@@ -368,6 +368,7 @@ class QnAEngine:
         response_model: Optional[Type[Any]] = None,
         output_format: Optional[OutputFormatType] = None,
         max_retries: Optional[int] = 3,
+        batch_size: int = 5,
         **kwargs
     ) -> Any:
         parser, model = self._get_parser_and_model(question_type, response_model)
@@ -388,51 +389,67 @@ class QnAEngine:
         # Set default max_retries if None
         if max_retries is None:
             max_retries = 3
-        
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                question_chain = question_prompt | self.llm
-                results = question_chain.invoke(
-                    {"num": num, "topic": topic, **kwargs},
-                )
-                results = results.content
-                
-                structured_output = parser.parse(results)
-                
-                # Get the questions from the structured output
-                if hasattr(structured_output, 'questions'):
-                    questions = structured_output.questions
-                    if len(questions) >= num:
-                        # Create final output using the model
-                        if response_model:
-                            final_output = response_model(questions=questions[:num])
-                        else:
-                            final_output = model(questions=questions[:num])
-                        
-                        if output_format:
-                            return self._handle_output_format(final_output, output_format)
-                        
-                        return final_output
-                    
-                print(f"Attempt {attempt + 1}/{max_retries}: Generated {len(questions)} questions, but {num} were requested.")
-                last_error = ValueError(f"Insufficient questions generated: got {len(questions)}, needed {num}")
-                
-            except Exception as e:
-                print(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
-                last_error = e
-                
-            # Add a small delay between retries (optional)
-            if attempt < max_retries - 1:
-                time.sleep(1)  # 1 second delay between retries
-        
-        # If we get here, all retries failed
-        print(f"Failed to generate questions after {max_retries} attempts.")
-        if last_error:
-            print(f"Last error: {str(last_error)}")
+
+        all_questions = []
+        remaining_questions = num
+
+        while remaining_questions > 0:
+            current_batch = min(batch_size, remaining_questions)
+            last_error = None
             
-        # Return empty model instance
-        return response_model(questions=[]) if response_model else model(questions=[])
+            for attempt in range(max_retries):
+                try:
+                    question_chain = question_prompt | self.llm
+                    results = question_chain.invoke(
+                        {"num": current_batch, "topic": topic, **kwargs},
+                    )
+                    results = results.content
+                    
+                    structured_output = parser.parse(results)
+                    
+                    if hasattr(structured_output, 'questions'):
+                        batch_questions = structured_output.questions
+                        if len(batch_questions) > 0:
+                            all_questions.extend(batch_questions[:current_batch])
+                            remaining_questions -= len(batch_questions[:current_batch])
+                            break  # Success, exit retry loop
+                    
+                    print(f"Attempt {attempt + 1}/{max_retries}: Generated {len(batch_questions) if 'batch_questions' in locals() else 0} questions in this batch")
+                    last_error = ValueError("No valid questions in response")
+                    
+                except Exception as e:
+                    print(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
+                    last_error = e
+                    
+                # Add delay between retries
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+            
+            # If all retries failed for this batch
+            if last_error and not batch_questions:
+                print(f"Failed to generate batch after {max_retries} attempts.")
+                print(f"Last error: {str(last_error)}")
+                # Reduce batch size and continue
+                batch_size = max(1, batch_size // 2)
+                if batch_size == 1 and remaining_questions > 0:
+                    break  # Exit if we can't reduce batch size further
+
+        # Create final output using the model
+        try:
+            if response_model:
+                final_output = response_model(questions=all_questions)
+            else:
+                final_output = model(questions=all_questions)
+            
+            if output_format:
+                return self._handle_output_format(final_output, output_format)
+            
+            return final_output
+            
+        except Exception as e:
+            print(f"Error creating final output: {str(e)}")
+            # Return empty model instance as fallback
+            return response_model(questions=[]) if response_model else model(questions=[])
 
     def generate_questions_from_data(
         self,
