@@ -34,9 +34,11 @@ from IPython.display import display, HTML
 
 
 import random
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
 QuestionType = Literal["Multiple Choice", "Short Answer", "True/False", "Fill in the Blank"]
 OutputFormatType = Literal["pdf", "csv"]
+EmbeddingType = Literal["openai", "gemini"]
 
 VISUAL_QUESTION_PROMPT_TEMPLATE = """Generate exactly {num} quantitative questions based on the topic: {topic}.
         Each question should require a visual representation of the data (bar graph, pie chart, line graph, or scatter plot or table) along with a detailed instruction on how to create that visual and options for the question. The question should be solvable based on the data in the visual.
@@ -156,15 +158,34 @@ class QnAEngine:
             return base_template
 
 
-    def _create_vector_store(self, content: str) -> Chroma:
+    def _initialize_embeddings(self, embedding_type: EmbeddingType = "openai", api_key: Optional[str] = None) -> Any:
+        """Initialize embeddings based on the specified type"""
+        if self.embeddings is not None:
+            return self.embeddings
+
+        if embedding_type == "openai":
+            return OpenAIEmbeddings(
+                api_key=api_key or self.llm_config.api_key,
+                base_url=self.llm_config.base_url,
+                default_headers=self.llm_config.default_headers
+            )
+        elif embedding_type == "gemini":
+            return GoogleGenerativeAIEmbeddings(
+                model="models/embedding-001",  # Gemini's embedding model
+                google_api_key=api_key or self.llm_config.api_key,
+            )
+        else:
+            raise ValueError(f"Unsupported embedding type: {embedding_type}")
+
+    def _create_vector_store(self, content: str, embedding_type: EmbeddingType = "openai") -> Chroma:
+        """Create vector store with specified embedding type"""
         if self.embeddings is None:
-            self.embeddings = OpenAIEmbeddings()
+            self.embeddings = self._initialize_embeddings(embedding_type)
 
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
         texts = text_splitter.split_text(content)
 
         vectorstore = Chroma.from_texts(texts, self.embeddings)
-
         return vectorstore
 
     def _setup_retrieval_qa(self, vector_store: Chroma) -> RetrievalQA:
@@ -345,42 +366,65 @@ class QnAEngine:
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
         output_format: Optional[OutputFormatType] = None,
+        max_retries: int = 3,
         **kwargs
     ) -> Any:
         parser, model = self._get_parser_and_model(question_type, response_model)
         format_instructions = parser.get_format_instructions()
         template = self._get_prompt_template(question_type, prompt_template)
-
+        
         if custom_instructions:
             template += f"\n\nAdditional Instructions:\n{custom_instructions}"
-
+        
         template += "\n\nThe response should be in JSON format.\n{format_instructions}"
-
+        
         question_prompt = PromptTemplate(
             input_variables=["num", "topic"],
             template=template,
             partial_variables={"format_instructions": format_instructions}
         )
-
-        question_chain = question_prompt | self.llm
-        results = question_chain.invoke(
-            {"num": num, "topic": topic, **kwargs},
-        )
-        results = results.content
-
-        try:
-            structured_output = parser.parse(results)
-
-            if output_format:
-                self._handle_output_format(structured_output, output_format)
-
-
-            return structured_output
-        except Exception as e:
-            print(f"Error parsing output in generate_questions: {e}")
-            print("Raw output:")
-            return model()
-
+        
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                question_chain = question_prompt | self.llm
+                results = question_chain.invoke(
+                    {"num": num, "topic": topic, **kwargs},
+                )
+                results = results.content
+                
+                structured_output = parser.parse(results)
+                
+                # Get the questions from the structured output
+                if hasattr(structured_output, 'questions'):
+                    questions = structured_output.questions
+                else:
+                    questions = []
+                
+                # Validate we got the expected number of questions
+                if len(questions) >= num:
+                    # Create final output using the model
+                    if response_model:
+                        final_output = response_model(questions=questions[:num])
+                    else:
+                        final_output = model(questions=questions[:num])
+                    
+                    if output_format:
+                        return self._handle_output_format(final_output, output_format)
+                    
+                    return final_output
+                else:
+                    print(f"Warning: Expected {num} questions but got {len(questions)}. Retrying...")
+                    retry_count += 1
+                    
+            except Exception as e:
+                print(f"Error in question generation (attempt {retry_count + 1}/{max_retries}): {str(e)}")
+                retry_count += 1
+                
+                if retry_count >= max_retries:
+                    print(f"Failed to generate questions after {max_retries} attempts.")
+                    # Return empty model instance if all retries fail
+                    return response_model() if response_model else model()
 
     def generate_questions_from_data(
         self,
@@ -418,14 +462,17 @@ class QnAEngine:
         learning_objective: str = "",
         difficulty_level: str = "",
         output_format: Optional[OutputFormatType] = None,
+        embedding_type: EmbeddingType = "openai",
+        embedding_api_key: Optional[str] = None,
         **kwargs
     ) -> Any:
-        if self.embeddings is None:
-            self.embeddings = OpenAIEmbeddings()
-
         content = self._load_data(source, source_type)
 
-        vector_store = self._create_vector_store(content)
+        # Create vector store with specified embedding type
+        vector_store = self._create_vector_store(
+            content, 
+            embedding_type=embedding_type
+        )
         qa_chain = self._setup_retrieval_qa(vector_store)
 
         parser, model = self._get_parser_and_model(question_type, response_model)
@@ -433,10 +480,10 @@ class QnAEngine:
 
         template = self._get_prompt_template(question_type, prompt_template)
 
-
         prompt_template += """
         Learning Objective: {learning_objective}
         Difficulty Level: {difficulty_level}
+        Embedding Model: {embedding_type}
 
         Ensure that the questions are relevant to the learning objective and match the specified difficulty level.
 
@@ -448,7 +495,7 @@ class QnAEngine:
             prompt_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
 
         question_prompt = PromptTemplate(
-            input_variables=["num", "topic", "learning_objective", "difficulty_level"],
+            input_variables=["num", "topic", "learning_objective", "difficulty_level", "embedding_type"],
             template=prompt_template,
             partial_variables={"format_instructions": format_instructions}
         )
@@ -458,6 +505,7 @@ class QnAEngine:
             topic=content[:1000],
             learning_objective=learning_objective,
             difficulty_level=difficulty_level,
+            embedding_type=embedding_type,
             **kwargs
         )
 
@@ -468,7 +516,6 @@ class QnAEngine:
 
             if output_format:
                 self._handle_output_format(structured_output, output_format)
-
 
             return structured_output
         except Exception as e:
