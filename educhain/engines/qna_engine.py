@@ -35,6 +35,7 @@ from IPython.display import display, HTML
 
 import random
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import time
 
 QuestionType = Literal["Multiple Choice", "Short Answer", "True/False", "Fill in the Blank"]
 OutputFormatType = Literal["pdf", "csv"]
@@ -366,7 +367,7 @@ class QnAEngine:
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
         output_format: Optional[OutputFormatType] = None,
-        max_retries: int = 3,
+        max_retries: Optional[int] = 3,
         **kwargs
     ) -> Any:
         parser, model = self._get_parser_and_model(question_type, response_model)
@@ -383,9 +384,13 @@ class QnAEngine:
             template=template,
             partial_variables={"format_instructions": format_instructions}
         )
+
+        # Set default max_retries if None
+        if max_retries is None:
+            max_retries = 3
         
-        retry_count = 0
-        while retry_count < max_retries:
+        last_error = None
+        for attempt in range(max_retries):
             try:
                 question_chain = question_prompt | self.llm
                 results = question_chain.invoke(
@@ -398,33 +403,36 @@ class QnAEngine:
                 # Get the questions from the structured output
                 if hasattr(structured_output, 'questions'):
                     questions = structured_output.questions
-                else:
-                    questions = []
+                    if len(questions) >= num:
+                        # Create final output using the model
+                        if response_model:
+                            final_output = response_model(questions=questions[:num])
+                        else:
+                            final_output = model(questions=questions[:num])
+                        
+                        if output_format:
+                            return self._handle_output_format(final_output, output_format)
+                        
+                        return final_output
+                    
+                print(f"Attempt {attempt + 1}/{max_retries}: Generated {len(questions)} questions, but {num} were requested.")
+                last_error = ValueError(f"Insufficient questions generated: got {len(questions)}, needed {num}")
                 
-                # Validate we got the expected number of questions
-                if len(questions) >= num:
-                    # Create final output using the model
-                    if response_model:
-                        final_output = response_model(questions=questions[:num])
-                    else:
-                        final_output = model(questions=questions[:num])
-                    
-                    if output_format:
-                        return self._handle_output_format(final_output, output_format)
-                    
-                    return final_output
-                else:
-                    print(f"Warning: Expected {num} questions but got {len(questions)}. Retrying...")
-                    retry_count += 1
-                    
             except Exception as e:
-                print(f"Error in question generation (attempt {retry_count + 1}/{max_retries}): {str(e)}")
-                retry_count += 1
+                print(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
+                last_error = e
                 
-                if retry_count >= max_retries:
-                    print(f"Failed to generate questions after {max_retries} attempts.")
-                    # Return empty model instance if all retries fail
-                    return response_model() if response_model else model()
+            # Add a small delay between retries (optional)
+            if attempt < max_retries - 1:
+                time.sleep(1)  # 1 second delay between retries
+        
+        # If we get here, all retries failed
+        print(f"Failed to generate questions after {max_retries} attempts.")
+        if last_error:
+            print(f"Last error: {str(last_error)}")
+            
+        # Return empty model instance
+        return response_model(questions=[]) if response_model else model(questions=[])
 
     def generate_questions_from_data(
         self,
