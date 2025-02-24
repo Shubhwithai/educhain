@@ -405,17 +405,37 @@ class QnAEngine:
                     )
                     results = results.content
                     
-                    structured_output = parser.parse(results)
-                    
-                    if hasattr(structured_output, 'questions'):
-                        batch_questions = structured_output.questions
-                        if len(batch_questions) > 0:
-                            all_questions.extend(batch_questions[:current_batch])
-                            remaining_questions -= len(batch_questions[:current_batch])
-                            break  # Success, exit retry loop
-                    
-                    print(f"Attempt {attempt + 1}/{max_retries}: Generated {len(batch_questions) if 'batch_questions' in locals() else 0} questions in this batch")
-                    last_error = ValueError("No valid questions in response")
+                    # Try to parse the raw JSON first
+                    try:
+                        import json
+                        raw_questions = json.loads(results)
+                        if 'questions' in raw_questions:
+                            # Filter out incomplete questions
+                            valid_questions = [
+                                q for q in raw_questions['questions']
+                                if all(key in q for key in ['question', 'answer', 'options'])
+                                and isinstance(q['options'], list)
+                                and len(q['options']) > 0
+                            ]
+                            
+                            # Create a new JSON with only valid questions
+                            cleaned_results = json.dumps({"questions": valid_questions})
+                            structured_output = parser.parse(cleaned_results)
+                            
+                            if hasattr(structured_output, 'questions'):
+                                batch_questions = structured_output.questions
+                                if len(batch_questions) > 0:
+                                    all_questions.extend(batch_questions[:current_batch])
+                                    remaining_questions -= len(batch_questions[:current_batch])
+                                    break  # Success, exit retry loop
+                                
+                            print(f"Attempt {attempt + 1}/{max_retries}: Generated {len(batch_questions) if 'batch_questions' in locals() else 0} valid questions in this batch")
+                    except json.JSONDecodeError as je:
+                        print(f"JSON parsing error: {str(je)}")
+                        last_error = je
+                    except Exception as e:
+                        print(f"Error processing questions: {str(e)}")
+                        last_error = e
                     
                 except Exception as e:
                     print(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
@@ -426,7 +446,7 @@ class QnAEngine:
                     time.sleep(1)
             
             # If all retries failed for this batch
-            if last_error and not batch_questions:
+            if last_error and not 'batch_questions' in locals():
                 print(f"Failed to generate batch after {max_retries} attempts.")
                 print(f"Last error: {str(last_error)}")
                 # Reduce batch size and continue
@@ -436,6 +456,10 @@ class QnAEngine:
 
         # Create final output using the model
         try:
+            if len(all_questions) == 0:
+                print("No valid questions were generated.")
+                return response_model(questions=[]) if response_model else model(questions=[])
+                
             if response_model:
                 final_output = response_model(questions=all_questions)
             else:
