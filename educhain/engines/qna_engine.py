@@ -513,6 +513,8 @@ class QnAEngine:
         output_format: Optional[OutputFormatType] = None,
         embedding_type: EmbeddingType = "openai",
         embedding_api_key: Optional[str] = None,
+        max_retries: int = 3,
+        batch_size: int = 5,
         **kwargs
     ) -> Any:
         content = self._load_data(source, source_type)
@@ -527,50 +529,75 @@ class QnAEngine:
         parser, model = self._get_parser_and_model(question_type, response_model)
         format_instructions = parser.get_format_instructions()
 
-        template = self._get_prompt_template(question_type, prompt_template)
-
-        prompt_template += """
+        # Create base template
+        base_template = self._get_prompt_template(question_type, prompt_template)
+        
+        # Create RAG-specific template
+        rag_template = f"""
+        Based on the provided content, generate {num} {question_type} questions.
+        
         Learning Objective: {learning_objective}
         Difficulty Level: {difficulty_level}
-        Embedding Model: {embedding_type}
-
-        Ensure that the questions are relevant to the learning objective and match the specified difficulty level.
-
+        
+        Guidelines:
+        1. Questions should be directly related to the content
+        2. Ensure accuracy and clarity
+        3. Match the specified difficulty level
+        4. Align with the learning objective
+        
+        Content Summary: {{topic}}
+        
+        {base_template if base_template else ''}
+        
+        {custom_instructions if custom_instructions else ''}
+        
         The response should be in JSON format.
         {format_instructions}
         """
 
-        if custom_instructions:
-            prompt_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
-
         question_prompt = PromptTemplate(
-            input_variables=["num", "topic", "learning_objective", "difficulty_level", "embedding_type"],
-            template=prompt_template,
-            partial_variables={"format_instructions": format_instructions}
+            input_variables=["topic"],
+            template=rag_template
         )
-
-        query = question_prompt.format(
-            num=num,
-            topic=content[:1000],
-            learning_objective=learning_objective,
-            difficulty_level=difficulty_level,
-            embedding_type=embedding_type,
-            **kwargs
-        )
-
-        results = qa_chain.invoke({"query": query, "n_results": 3})
 
         try:
-            structured_output = parser.parse(results["result"])
+            query = question_prompt.format(topic=content[:1000])  # Limit content length
+            results = qa_chain.invoke({"query": query})
 
-            if output_format:
-                self._handle_output_format(structured_output, output_format)
+            try:
+                # Try to parse the raw JSON first
+                import json
+                raw_questions = json.loads(results["result"])
+                if 'questions' in raw_questions:
+                    # Filter out incomplete questions
+                    valid_questions = [
+                        q for q in raw_questions['questions']
+                        if all(key in q for key in ['question', 'answer', 'options'])
+                        and isinstance(q['options'], list)
+                        and len(q['options']) > 0
+                    ]
+                    
+                    # Create a new JSON with only valid questions
+                    cleaned_results = json.dumps({"questions": valid_questions})
+                    structured_output = parser.parse(cleaned_results)
+                    
+                    if output_format:
+                        return self._handle_output_format(structured_output, output_format)
+                    
+                    return structured_output
 
-            return structured_output
+            except json.JSONDecodeError as je:
+                print(f"JSON parsing error: {str(je)}")
+                print("Raw output:", results["result"])
+            except Exception as e:
+                print(f"Error processing questions: {str(e)}")
+                print("Raw output:", results["result"])
+
         except Exception as e:
-            print(f"Error parsing output in generate_questions_with_rag: {e}")
-            print("Raw output:", results)
-            return model()
+            print(f"Error in RAG question generation: {str(e)}")
+        
+        # Return empty model instance if all attempts fail
+        return response_model(questions=[]) if response_model else model(questions=[])
 
     def generate_similar_options(self, question, correct_answer, num_options=3):
         llm = self.llm
