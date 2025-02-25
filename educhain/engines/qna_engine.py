@@ -443,7 +443,12 @@ class QnAEngine:
         embedding_type: EmbeddingType = "openai",
         **kwargs
     ) -> Any:
-      
+        """
+        Generate questions using Retrieval-Augmented Generation (RAG) from source content.
+        """
+        # Get parser and model first, outside try block to ensure model is always defined
+        parser, model = self._get_parser_and_model(question_type, response_model)
+        
         try:
             # Initialize embeddings if not already done
             if self.embeddings is None:
@@ -458,8 +463,7 @@ class QnAEngine:
             vector_store = self._create_vector_store(content, embedding_type)
             qa_chain = self._setup_retrieval_qa(vector_store)
 
-            # Setup parser and template
-            parser, model = self._get_parser_and_model(question_type, response_model)
+            # Get format instructions
             format_instructions = parser.get_format_instructions()
             
             # Build the complete prompt template
@@ -526,8 +530,6 @@ class QnAEngine:
 
         except Exception as e:
             print(f"Error in generate_questions_with_rag: {str(e)}")
-            if response_model:
-                return response_model()
             return model()
 
 
