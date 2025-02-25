@@ -26,13 +26,10 @@ import base64
 import os
 from PIL import Image
 import io
-
 import matplotlib.pyplot as plt
 import pandas as pd
 import dataframe_image as dfi
 from IPython.display import display, HTML
-
-
 import random
 
 QuestionType = Literal["Multiple Choice", "Short Answer", "True/False", "Fill in the Blank"]
@@ -184,19 +181,45 @@ class QnAEngine:
         else:
             raise ValueError("Unsupported source type. Please use 'pdf', 'url', or 'text'.")
 
+    def _create_vector_store(self, content: str) -> Chroma:
+        if self.embeddings is None:
+            self.embeddings = OpenAIEmbeddings()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+        texts = text_splitter.split_text(content)
+        vectorstore = Chroma.from_texts(texts, self.embeddings)
+        return vectorstore
+
+    def _setup_retrieval_qa(self, vector_store: Chroma) -> RetrievalQA:
+        return RetrievalQA.from_chain_type(
+            llm=self.llm,
+            chain_type="stuff",
+            retriever=vector_store.as_retriever(),
+        )
+    def _load_data(self, source: str, source_type: str) -> str:
+     
+        if source_type == 'pdf':
+            return self.pdf_loader.load_data(source)
+        elif source_type == 'url':
+            return self.url_loader.load_data(source)
+        elif source_type == 'text':
+            return source
+        else:
+            raise ValueError("Unsupported source type. Please use 'pdf', 'url', or 'text'.")
+            
     def _handle_output_format(self, data: Any, output_format: Optional[OutputFormatType]) -> Union[Any, Tuple[Any, str]]:
+        
         if output_format is None:
             return data
-
+            
         formatter = OutputFormatter()
         if output_format == "pdf":
             output_file = formatter.to_pdf(data)
+            return data, output_file
         elif output_format == "csv":
             output_file = formatter.to_csv(data)
+            return data, output_file
         else:
             raise ValueError(f"Unsupported output format: {output_format}")
-
-        return data, output_file
 
 
     def _generate_and_save_visual(self, instruction, question_text, options, correct_answer):
@@ -420,61 +443,123 @@ class QnAEngine:
         output_format: Optional[OutputFormatType] = None,
         **kwargs
     ) -> Any:
+       
+        # Initialize embeddings if not already done
         if self.embeddings is None:
             self.embeddings = OpenAIEmbeddings()
-
+            
+        # Load content using the existing loader method
         content = self._load_data(source, source_type)
-
+        
+        # Create vector store using the existing method
         vector_store = self._create_vector_store(content)
+        
+        # Set up retrieval QA chain using the existing method
         qa_chain = self._setup_retrieval_qa(vector_store)
-
+        
+        # Get appropriate parser and model based on question type
         parser, model = self._get_parser_and_model(question_type, response_model)
         format_instructions = parser.get_format_instructions()
-
-        template = self._get_prompt_template(question_type, prompt_template)
-
-
-        prompt_template += """
-        Learning Objective: {learning_objective}
-        Difficulty Level: {difficulty_level}
-
-        Ensure that the questions are relevant to the learning objective and match the specified difficulty level.
-
-        The response should be in JSON format.
-        {format_instructions}
+        
+        # Get base prompt template if not provided
+        if prompt_template is None:
+            prompt_template = self._get_prompt_template(question_type)
+        
+        # Construct full prompt with learning objectives and difficulty
+        full_prompt = f"""
+        Generate {num} {question_type} questions based on the following content:
+        
+        {{topic}}
+        
+        Learning Objective: {{learning_objective}}
+        Difficulty Level: {{difficulty_level}}
+        
+        Ensure that the questions:
+        1. Are directly relevant to the learning objective
+        2. Match the specified difficulty level
+        3. Test understanding rather than mere recall
+        4. Are clear, unambiguous, and grammatically correct
+        5. For multiple choice questions, include plausible distractors
+        
+        {{format_instructions}}
         """
-
+        
+        # Add custom instructions if provided
         if custom_instructions:
-            prompt_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
-
+            full_prompt += f"\n\nAdditional Instructions:\n{{custom_instructions}}"
+        
+        # Create prompt template
         question_prompt = PromptTemplate(
-            input_variables=["num", "topic", "learning_objective", "difficulty_level"],
-            template=prompt_template,
+            input_variables=["topic", "learning_objective", "difficulty_level", "custom_instructions"],
+            template=full_prompt,
             partial_variables={"format_instructions": format_instructions}
         )
-
-        query = question_prompt.format(
-            num=num,
-            topic=content[:1000],
-            learning_objective=learning_objective,
-            difficulty_level=difficulty_level,
-            **kwargs
-        )
-
-        results = qa_chain.invoke({"query": query, "n_results": 3})
-
-        try:
-            structured_output = parser.parse(results["result"])
-
-            if output_format:
-                self._handle_output_format(structured_output, output_format)
-
-
-            return structured_output
-        except Exception as e:
-            print(f"Error parsing output in generate_questions_with_rag: {e}")
-            print("Raw output:", results)
-            return model()
+        
+        # Use the TextSplitter to chunk content if it's too large
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        chunks = text_splitter.split_text(content)
+        
+        all_results = []
+        total_questions = 0
+        
+        # Process chunks until we have enough questions
+        for i, chunk in enumerate(chunks):
+            if total_questions >= num:
+                break
+                
+            # Calculate how many questions to request from this chunk
+            questions_needed = min(num - total_questions, max(1, num // len(chunks) + 1))
+            
+            # Format the prompt with current chunk
+            query = question_prompt.format(
+                topic=chunk,
+                learning_objective=learning_objective,
+                difficulty_level=difficulty_level,
+                custom_instructions=custom_instructions or "",
+                **kwargs
+            )
+            
+            # Retrieve context and generate questions
+            try:
+                retrieval_results = qa_chain.invoke({
+                    "query": query, 
+                    "n_results": min(3, len(chunks))  # Adjust based on content size
+                })
+                
+                # Parse the results
+                chunk_results = parser.parse(retrieval_results["result"])
+                
+                # Extract questions from the result
+                if hasattr(chunk_results, "questions"):
+                    questions = chunk_results.questions
+                elif isinstance(chunk_results, list):
+                    questions = chunk_results
+                else:
+                    questions = [chunk_results]
+                
+                all_results.extend(questions)
+                total_questions += len(questions)
+                
+            except Exception as e:
+                # Add import for logger if not already present
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Error processing chunk {i}: {str(e)}")
+                # Continue with next chunk instead of failing
+                continue
+        
+        # Limit to requested number of questions
+        final_results = all_results[:num]
+        
+        # Create the structured output
+        structured_output = model(questions=final_results)
+        
+        # Handle output format if specified
+        if output_format:
+            return self._handle_output_format(structured_output, output_format)
+            
+        return structured_output
+  
 
     def generate_similar_options(self, question, correct_answer, num_options=3):
         llm = self.llm
