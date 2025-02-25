@@ -367,11 +367,27 @@ class QnAEngine:
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
         output_format: Optional[OutputFormatType] = None,
+        llm_config: Optional[LLMConfig] = None,
+        max_retries: int = 3,      # Keep max_retries parameter
         **kwargs
     ) -> Any:
+        # Removed input validation for max_questions
+
         parser, model = self._get_parser_and_model(question_type, response_model)
         format_instructions = parser.get_format_instructions()
-        template = self._get_prompt_template(question_type, prompt_template)
+
+        if response_model:
+            if prompt_template:
+                template = prompt_template
+            else:
+                template = """
+                Generate {num} questions based on the given topic.
+                Topic: {topic}
+
+                Ensure that each question follows the structure specified in the format instructions.
+                """
+        else:
+            template = self._get_prompt_template(question_type, prompt_template)
 
         if custom_instructions:
             template += f"\n\nAdditional Instructions:\n{custom_instructions}"
@@ -384,24 +400,34 @@ class QnAEngine:
             partial_variables={"format_instructions": format_instructions}
         )
 
-        question_chain = question_prompt | self.llm
-        results = question_chain.invoke(
-            {"num": num, "topic": topic, **kwargs},
-        )
-        results = results.content
+        llm_to_use = self._initialize_llm(llm_config) if llm_config else self.llm
 
-        try:
-            structured_output = parser.parse(results)
+        generated_questions = [] # To store successfully generated questions
+        attempts = 0
+        while len(generated_questions) < num and attempts < max_retries: # Retry loop
+            attempts += 1
+            try:
+                question_chain = question_prompt | llm_to_use
+                results = question_chain.invoke(
+                    {"num": num - len(generated_questions), "topic": topic, **kwargs}, # Generate remaining questions
+                )
+                results = results.content
 
-            if output_format:
-                self._handle_output_format(structured_output, output_format)
+                structured_output = parser.parse(results)
+                generated_questions.extend(structured_output.questions) # Extend the list with new questions
 
+            except Exception as e:
+                print(f"Error generating questions (attempt {attempts}/{max_retries}): {e}")
+                print("Raw output:")
+                print(results) # results might be undefined if exception before invoke
 
-            return structured_output
-        except Exception as e:
-            print(f"Error parsing output in generate_questions: {e}")
-            print("Raw output:")
-            return model()
+        # Create a QuestionList (or appropriate list model) with the generated questions
+        final_output = model(questions=generated_questions[:num]) # Ensure not exceeding requested num
+
+        if output_format:
+            self._handle_output_format(final_output, output_format)
+
+        return final_output
 
 
     def generate_questions_from_data(
