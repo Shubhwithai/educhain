@@ -440,87 +440,65 @@ class QnAEngine:
         learning_objective: str = "",
         difficulty_level: str = "",
         output_format: Optional[OutputFormatType] = None,
-        embedding_type: EmbeddingType = "openai",
-        embedding_api_key: Optional[str] = None,
+        llm_config: Optional[LLMConfig] = None, # Added llm_config
         **kwargs
     ) -> Any:
+
+        llm_to_use = self._initialize_llm(llm_config) if llm_config else self.llm # Initialize LLM based on llm_config
+        embeddings_to_use = self._initialize_embeddings(llm_config) if llm_config else OpenAIEmbeddings() # Initialize Embeddings based on llm_config
+
+
         content = self._load_data(source, source_type)
 
-        # Create vector store with specified embedding type
-        vector_store = self._create_vector_store(
-            content, 
-            embedding_type=embedding_type
-        )
-        qa_chain = self._setup_retrieval_qa(vector_store)
+        vector_store = Chroma.from_texts(content.split("\n"), embeddings_to_use) # Use embeddings_to_use
+        qa_chain = self._setup_retrieval_qa(vector_store, llm_to_use) # Pass llm_to_use here
 
         parser, model = self._get_parser_and_model(question_type, response_model)
         format_instructions = parser.get_format_instructions()
 
-        # Create base template
-        base_template = self._get_prompt_template(question_type, prompt_template)
-        
-        # Create RAG-specific template
-        rag_template = f"""
-        Based on the provided content, generate {num} {question_type} questions.
-        
+        if prompt_template is None:
+            prompt_template = self._get_prompt_template(question_type)
+
+        prompt_template += """
         Learning Objective: {learning_objective}
         Difficulty Level: {difficulty_level}
-        
-        Guidelines:
-        1. Questions should be directly related to the content
-        2. Ensure accuracy and clarity
-        3. Match the specified difficulty level
-        4. Align with the learning objective
-        
-        Content Summary: {{topic}}
-        
-        {base_template if base_template else ''}
-        
-        {custom_instructions if custom_instructions else ''}
-        
+
+        Ensure that the questions are relevant to the learning objective and match the specified difficulty level.
+
         The response should be in JSON format.
         {format_instructions}
         """
 
+        if custom_instructions:
+            prompt_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
+
         question_prompt = PromptTemplate(
-            input_variables=["topic"],
-            template=rag_template
+            input_variables=["num", "topic", "learning_objective", "difficulty_level"],
+            template=prompt_template,
+            partial_variables={"format_instructions": format_instructions}
         )
 
+        query = question_prompt.format(
+            num=num,
+            topic=content[:1000],  # Use a subset of content to fit in context
+            learning_objective=learning_objective,
+            difficulty_level=difficulty_level,
+            **kwargs
+        )
+
+        results = qa_chain.invoke({"query": query, "n_results": 3})
+
         try:
-            query = question_prompt.format(topic=content[:1000])  # Limit content length
-            results = qa_chain.invoke({"query": query})
+            structured_output = parser.parse(results["result"])
 
-            try:
-                import json
-                raw_questions = json.loads(results["result"])
-                if 'questions' in raw_questions:
-                    # Filter out incomplete questions
-                    valid_questions = [
-                        q for q in raw_questions['questions']
-                        if all(key in q for key in ['question', 'answer', 'options'])
-                        and isinstance(q['options'], list)
-                        and len(q['options']) > 0
-                    ][:num]  # Limit to requested number of questions
-                    
-                    # Create output with valid questions
-                    structured_output = parser.parse(json.dumps({"questions": valid_questions}))
-                    
-                    if output_format:
-                        return self._handle_output_format(structured_output, output_format)
-                    
-                    return structured_output
+            if output_format:
+                self._handle_output_format(structured_output, output_format)
 
-            except json.JSONDecodeError as je:
-                print(f"Error parsing JSON response: {str(je)}")
-            except Exception as e:
-                print(f"Error processing questions: {str(e)}")
-
+            return structured_output
         except Exception as e:
-            print(f"Error in RAG question generation: {str(e)}")
-        
-        # Return empty model instance if generation fails
-        return response_model(questions=[]) if response_model else model(questions=[])
+            print(f"Error parsing output: {e}")
+            print("Raw output:", results)
+            return model()
 
     def generate_similar_options(self, question, correct_answer, num_options=3):
         llm = self.llm
