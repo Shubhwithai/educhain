@@ -404,6 +404,7 @@ class QnAEngine:
 
         generated_questions = [] # To store successfully generated questions
         attempts = 0
+        results_content = "" # To store results content for debugging in case of error
         while len(generated_questions) < num and attempts < max_retries: # Retry loop
             attempts += 1
             try:
@@ -411,17 +412,22 @@ class QnAEngine:
                 results = question_chain.invoke(
                     {"num": num - len(generated_questions), "topic": topic, **kwargs}, # Generate remaining questions
                 )
-                results = results.content
+                results_content = results.content # Store results content for debugging
+                structured_output = parser.parse(results_content) # Parse all results together
 
-                structured_output = parser.parse(results)
-                generated_questions.extend(structured_output.questions) # Extend the list with new questions
+                if structured_output and structured_output.questions: # Check if parsing was successful and questions are present
+                    generated_questions.extend(structured_output.questions) # Extend the list with new questions
+                else:
+                    print(f"Warning: No questions parsed from output in attempt {attempts}/{max_retries}. Raw output may have issues.")
+                    print("Raw output:", results_content)
+
 
             except Exception as e:
-                print(f"Error generating questions (attempt {attempts}/{max_retries}): {e}")
+                print(f"Error parsing output (attempt {attempts}/{max_retries}): {e}")
                 print("Raw output:")
-                print(results) # results might be undefined if exception before invoke
+                print(results_content) # Print stored results content for debugging
 
-        # Create a QuestionList (or appropriate list model) with the generated questions
+        # Create a QuestionList (or appropriate list model) with the successfully generated questions
         final_output = model(questions=generated_questions[:num]) # Ensure not exceeding requested num
 
         if output_format:
