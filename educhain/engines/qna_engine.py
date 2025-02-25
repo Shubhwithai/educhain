@@ -367,113 +367,42 @@ class QnAEngine:
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
         output_format: Optional[OutputFormatType] = None,
-        max_retries: Optional[int] = 3,
-        batch_size: int = 5,
         **kwargs
     ) -> Any:
         parser, model = self._get_parser_and_model(question_type, response_model)
         format_instructions = parser.get_format_instructions()
         template = self._get_prompt_template(question_type, prompt_template)
-        
+
         if custom_instructions:
             template += f"\n\nAdditional Instructions:\n{custom_instructions}"
-        
+
         template += "\n\nThe response should be in JSON format.\n{format_instructions}"
-        
+
         question_prompt = PromptTemplate(
             input_variables=["num", "topic"],
             template=template,
             partial_variables={"format_instructions": format_instructions}
         )
 
-        # Set default max_retries if None
-        if max_retries is None:
-            max_retries = 3
+        question_chain = question_prompt | self.llm
+        results = question_chain.invoke(
+            {"num": num, "topic": topic, **kwargs},
+        )
+        results = results.content
 
-        all_questions = []
-        remaining_questions = num
-
-        while remaining_questions > 0:
-            current_batch = min(batch_size, remaining_questions)
-            last_error = None
-            
-            for attempt in range(max_retries):
-                try:
-                    question_chain = question_prompt | self.llm
-                    results = question_chain.invoke(
-                        {"num": current_batch, "topic": topic, **kwargs},
-                    )
-                    results = results.content
-                    
-                    # Try to parse the raw JSON first
-                    try:
-                        import json
-                        raw_questions = json.loads(results)
-                        if 'questions' in raw_questions:
-                            # Filter out incomplete questions
-                            valid_questions = [
-                                q for q in raw_questions['questions']
-                                if all(key in q for key in ['question', 'answer', 'options'])
-                                and isinstance(q['options'], list)
-                                and len(q['options']) > 0
-                            ]
-                            
-                            # Create a new JSON with only valid questions
-                            cleaned_results = json.dumps({"questions": valid_questions})
-                            structured_output = parser.parse(cleaned_results)
-                            
-                            if hasattr(structured_output, 'questions'):
-                                batch_questions = structured_output.questions
-                                if len(batch_questions) > 0:
-                                    all_questions.extend(batch_questions[:current_batch])
-                                    remaining_questions -= len(batch_questions[:current_batch])
-                                    break  # Success, exit retry loop
-                                
-                            print(f"Attempt {attempt + 1}/{max_retries}: Generated {len(batch_questions) if 'batch_questions' in locals() else 0} valid questions in this batch")
-                    except json.JSONDecodeError as je:
-                        print(f"JSON parsing error: {str(je)}")
-                        last_error = je
-                    except Exception as e:
-                        print(f"Error processing questions: {str(e)}")
-                        last_error = e
-                    
-                except Exception as e:
-                    print(f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}")
-                    last_error = e
-                    
-                # Add delay between retries
-                if attempt < max_retries - 1:
-                    time.sleep(1)
-            
-            # If all retries failed for this batch
-            if last_error and not 'batch_questions' in locals():
-                print(f"Failed to generate batch after {max_retries} attempts.")
-                print(f"Last error: {str(last_error)}")
-                # Reduce batch size and continue
-                batch_size = max(1, batch_size // 2)
-                if batch_size == 1 and remaining_questions > 0:
-                    break  # Exit if we can't reduce batch size further
-
-        # Create final output using the model
         try:
-            if len(all_questions) == 0:
-                print("No valid questions were generated.")
-                return response_model(questions=[]) if response_model else model(questions=[])
-                
-            if response_model:
-                final_output = response_model(questions=all_questions)
-            else:
-                final_output = model(questions=all_questions)
-            
+            structured_output = parser.parse(results)
+
             if output_format:
-                return self._handle_output_format(final_output, output_format)
-            
-            return final_output
-            
+                self._handle_output_format(structured_output, output_format)
+
+
+            return structured_output
         except Exception as e:
-            print(f"Error creating final output: {str(e)}")
-            # Return empty model instance as fallback
-            return response_model(questions=[]) if response_model else model(questions=[])
+            print(f"Error parsing output in generate_questions: {e}")
+            print("Raw output:")
+            return model()
+
 
     def generate_questions_from_data(
         self,
