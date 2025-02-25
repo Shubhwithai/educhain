@@ -31,15 +31,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import dataframe_image as dfi
 from IPython.display import display, HTML
-
-
 import random
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
 import time
 
 QuestionType = Literal["Multiple Choice", "Short Answer", "True/False", "Fill in the Blank"]
 OutputFormatType = Literal["pdf", "csv"]
-EmbeddingType = Literal["openai", "gemini"]
 
 VISUAL_QUESTION_PROMPT_TEMPLATE = """Generate exactly {num} quantitative questions based on the topic: {topic}.
         Each question should require a visual representation of the data (bar graph, pie chart, line graph, or scatter plot or table) along with a detailed instruction on how to create that visual and options for the question. The question should be solvable based on the data in the visual.
@@ -347,145 +343,41 @@ class QnAEngine:
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
         output_format: Optional[OutputFormatType] = None,
-        llm_config: Optional[LLMConfig] = None,
-        max_retries: int = 3,
-        retry_delay: float = 1.0,  # Added retry delay parameter
         **kwargs
     ) -> Any:
-    
-        # Input validation
-        if num <= 0:
-            raise ValueError("Number of questions must be positive")
-        if max_retries < 1:
-            raise ValueError("Maximum retries must be at least 1")
-        
-        # Get appropriate parser and response model
         parser, model = self._get_parser_and_model(question_type, response_model)
-        
-        # Get format instructions from parser
-        try:
-            format_instructions = parser.get_format_instructions()
-        except Exception as e:
-            raise RuntimeError(f"Failed to get format instructions: {e}")
-        
-        # Determine the template to use
-        if response_model:
-            template = prompt_template if prompt_template else """
-                Generate {num} questions based on the given topic.
-                Topic: {topic}
-                
-                Ensure that each question follows the structure specified in the format instructions.
-            """
-        else:
-            template = self._get_prompt_template(question_type, prompt_template)
-        
-        # Add custom instructions if provided
+        format_instructions = parser.get_format_instructions()
+        template = self._get_prompt_template(question_type, prompt_template)
+
         if custom_instructions:
             template += f"\n\nAdditional Instructions:\n{custom_instructions}"
-        
-        # Add format instructions
+
         template += "\n\nThe response should be in JSON format.\n{format_instructions}"
-        
-        # Create prompt template
+
+        question_prompt = PromptTemplate(
+            input_variables=["num", "topic"],
+            template=template,
+            partial_variables={"format_instructions": format_instructions}
+        )
+
+        question_chain = question_prompt | self.llm
+        results = question_chain.invoke(
+            {"num": num, "topic": topic, **kwargs},
+        )
+        results = results.content
+
         try:
-            question_prompt = PromptTemplate(
-                input_variables=["num", "topic"],
-                template=template,
-                partial_variables={"format_instructions": format_instructions}
-            )
+            structured_output = parser.parse(results)
+
+            if output_format:
+                self._handle_output_format(structured_output, output_format)
+
+
+            return structured_output
         except Exception as e:
-            raise RuntimeError(f"Failed to create prompt template: {e}")
-        
-        # Initialize LLM with provided config or use default
-        llm_to_use = self._initialize_llm(llm_config) if llm_config else self.llm
-        if not llm_to_use:
-            raise ValueError("No valid language model available")
-        
-        # Initialize data structures for tracking
-        generated_questions = []  # Successfully generated questions
-        failed_attempts = 0
-        errors = []  # Track all encountered errors
-        
-        # Main retry loop
-        while len(generated_questions) < num and failed_attempts < max_retries:
-            try:
-                # Calculate remaining questions to generate
-                remaining = num - len(generated_questions)
-                
-                # Create and invoke the question chain
-                question_chain = question_prompt | llm_to_use
-                results = question_chain.invoke(
-                    {"num": remaining, "topic": topic, **kwargs}
-                )
-                
-                # Store results content for potential debugging
-                results_content = getattr(results, 'content', str(results))
-                
-                # Parse the results
-                structured_output = parser.parse(results_content)
-                
-                # Validate and process the output
-                if structured_output and hasattr(structured_output, 'questions') and structured_output.questions:
-                    # Add uniqueness check to avoid duplicates
-                    new_questions = []
-                    existing_content = {q.content if hasattr(q, 'content') else str(q) for q in generated_questions}
-                    
-                    for q in structured_output.questions:
-                        q_content = q.content if hasattr(q, 'content') else str(q)
-                        if q_content not in existing_content:
-                            new_questions.append(q)
-                            existing_content.add(q_content)
-                    
-                    # Add the unique new questions
-                    generated_questions.extend(new_questions)
-                    
-                    # If we've generated enough questions, break out of the loop
-                    if len(generated_questions) >= num:
-                        break
-                        
-                    # If we didn't get any new unique questions, count as failed attempt
-                    if not new_questions:
-                        failed_attempts += 1
-                        logging.warning(f"Attempt {failed_attempts}/{max_retries} produced no new unique questions")
-                else:
-                    failed_attempts += 1
-                    error_msg = "No valid questions parsed from output"
-                    errors.append(error_msg)
-                    logging.warning(f"{error_msg} (attempt {failed_attempts}/{max_retries})")
-                    logging.debug(f"Raw output: {results_content}")
-                    
-                # Add delay between retries if needed
-                if len(generated_questions) < num and failed_attempts < max_retries:
-                    time.sleep(retry_delay)
-                    
-            except Exception as e:
-                failed_attempts += 1
-                errors.append(str(e))
-                logging.error(f"Error in question generation (attempt {failed_attempts}/{max_retries}): {e}")
-                
-                # Add delay between retries
-                if failed_attempts < max_retries:
-                    time.sleep(retry_delay)
-        
-        # Log warning if we couldn't generate all requested questions
-        if len(generated_questions) < num:
-            logging.warning(
-                f"Could only generate {len(generated_questions)}/{num} questions after {max_retries} attempts. "
-                f"Errors encountered: {errors}"
-            )
-        
-        # Prepare final output
-        final_output = model(questions=generated_questions[:num])
-        
-        # Handle specified output format if needed
-        if output_format:
-            try:
-                self._handle_output_format(final_output, output_format)
-            except Exception as e:
-                logging.error(f"Error formatting output: {e}")
-                # Continue with unformatted output rather than failing completely
-        
-        return final_output
+            print(f"Error parsing output in generate_questions: {e}")
+            print("Raw output:")
+            return model()
 
 
     def generate_questions_from_data(
@@ -526,24 +418,7 @@ class QnAEngine:
         output_format: Optional[OutputFormatType] = None,
         **kwargs
     ) -> Any:
-        """
-        Generate questions using Retrieval-Augmented Generation (RAG) from a source.
-        
-        Args:
-            source: The source content or path to source file
-            source_type: Type of source (e.g., 'text', 'pdf', 'url')
-            num: Number of questions to generate
-            question_type: Type of questions (e.g., 'Multiple Choice', 'True/False')
-            prompt_template: Optional custom prompt template
-            custom_instructions: Additional instructions for the LLM
-            response_model: Optional Pydantic model for output validation
-            learning_objective: Educational objective for the questions
-            difficulty_level: Desired difficulty level
-            output_format: Optional output format specification
-            
-        Returns:
-            Generated questions in structured format
-        """
+       
         # Initialize embeddings if not already done
         if self.embeddings is None:
             self.embeddings = OpenAIEmbeddings()

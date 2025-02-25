@@ -137,3 +137,4 @@ class SpeechInstructions(BaseModel):
     num_questions: Optional[int] = 5
     custom_instructions: Optional[str] = None
     detected_language: Optional[str] = "english"
+
