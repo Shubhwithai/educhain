@@ -641,6 +641,9 @@ class QnAEngine:
                 total_questions += len(questions)
                 
             except Exception as e:
+                # Add import for logger if not already present
+                import logging
+                logger = logging.getLogger(__name__)
                 logger.warning(f"Error processing chunk {i}: {str(e)}")
                 # Continue with next chunk instead of failing
                 continue
@@ -649,10 +652,7 @@ class QnAEngine:
         final_results = all_results[:num]
         
         # Create the structured output
-        if response_model:
-            structured_output = model(questions=final_results)
-        else:
-            structured_output = {"questions": final_results}
+        structured_output = model(questions=final_results)
         
         # Handle output format if specified
         if output_format:
