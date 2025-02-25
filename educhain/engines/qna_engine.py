@@ -440,65 +440,96 @@ class QnAEngine:
         learning_objective: str = "",
         difficulty_level: str = "",
         output_format: Optional[OutputFormatType] = None,
-        llm_config: Optional[LLMConfig] = None, # Added llm_config
+        embedding_type: EmbeddingType = "openai",
         **kwargs
     ) -> Any:
-
-        llm_to_use = self._initialize_llm(llm_config) if llm_config else self.llm # Initialize LLM based on llm_config
-        embeddings_to_use = self._initialize_embeddings(llm_config) if llm_config else OpenAIEmbeddings() # Initialize Embeddings based on llm_config
-
-
-        content = self._load_data(source, source_type)
-
-        vector_store = Chroma.from_texts(content.split("\n"), embeddings_to_use) # Use embeddings_to_use
-        qa_chain = self._setup_retrieval_qa(vector_store, llm_to_use) # Pass llm_to_use here
-
-        parser, model = self._get_parser_and_model(question_type, response_model)
-        format_instructions = parser.get_format_instructions()
-
-        if prompt_template is None:
-            prompt_template = self._get_prompt_template(question_type)
-
-        prompt_template += """
-        Learning Objective: {learning_objective}
-        Difficulty Level: {difficulty_level}
-
-        Ensure that the questions are relevant to the learning objective and match the specified difficulty level.
-
-        The response should be in JSON format.
-        {format_instructions}
-        """
-
-        if custom_instructions:
-            prompt_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
-
-        question_prompt = PromptTemplate(
-            input_variables=["num", "topic", "learning_objective", "difficulty_level"],
-            template=prompt_template,
-            partial_variables={"format_instructions": format_instructions}
-        )
-
-        query = question_prompt.format(
-            num=num,
-            topic=content[:1000],  # Use a subset of content to fit in context
-            learning_objective=learning_objective,
-            difficulty_level=difficulty_level,
-            **kwargs
-        )
-
-        results = qa_chain.invoke({"query": query, "n_results": 3})
-
+      
         try:
-            structured_output = parser.parse(results["result"])
+            # Initialize embeddings if not already done
+            if self.embeddings is None:
+                self.embeddings = self._initialize_embeddings(embedding_type)
 
+            # Load and process content
+            content = self._load_data(source, source_type)
+            if not content:
+                raise ValueError(f"No content loaded from {source_type} source: {source}")
+
+            # Create vector store and setup RAG
+            vector_store = self._create_vector_store(content, embedding_type)
+            qa_chain = self._setup_retrieval_qa(vector_store)
+
+            # Setup parser and template
+            parser, model = self._get_parser_and_model(question_type, response_model)
+            format_instructions = parser.get_format_instructions()
+            
+            # Build the complete prompt template
+            base_template = self._get_prompt_template(question_type, prompt_template)
+            rag_template = f"""
+            Based on the provided content, generate {num} {question_type} questions.
+            
+            Learning Objective: {{learning_objective}}
+            Difficulty Level: {{difficulty_level}}
+            
+            Guidelines:
+            1. Ensure questions are directly related to the content
+            2. Match the specified difficulty level
+            3. Align with the learning objective
+            4. Use accurate information from the source
+            5. Provide clear and unambiguous questions
+            
+            {base_template}
+            
+            The response should be in JSON format.
+            {{format_instructions}}
+            """
+
+            if custom_instructions:
+                rag_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
+
+            # Create the prompt
+            question_prompt = PromptTemplate(
+                input_variables=["num", "topic", "learning_objective", "difficulty_level"],
+                template=rag_template,
+                partial_variables={"format_instructions": format_instructions}
+            )
+
+            # Format the query with content chunk
+            max_content_length = 1000  # Adjust based on model's context window
+            content_chunk = content[:max_content_length]
+            query = question_prompt.format(
+                num=num,
+                topic=content_chunk,
+                learning_objective=learning_objective,
+                difficulty_level=difficulty_level,
+                **kwargs
+            )
+
+            # Get RAG results
+            results = qa_chain.invoke({
+                "query": query,
+                "n_results": 3,  # Adjust based on needs
+            })
+
+            # Parse and format output
+            try:
+                structured_output = parser.parse(results["result"])
+            except Exception as parse_error:
+                print(f"Error parsing RAG output: {parse_error}")
+                print("Raw output:", results["result"])
+                return model()
+
+            # Handle output formatting if specified
             if output_format:
-                self._handle_output_format(structured_output, output_format)
+                return self._handle_output_format(structured_output, output_format)
 
             return structured_output
+
         except Exception as e:
-            print(f"Error parsing output: {e}")
-            print("Raw output:", results)
+            print(f"Error in generate_questions_with_rag: {str(e)}")
+            if response_model:
+                return response_model()
             return model()
+
 
     def generate_similar_options(self, question, correct_answer, num_options=3):
         llm = self.llm
