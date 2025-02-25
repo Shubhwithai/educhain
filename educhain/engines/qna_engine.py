@@ -513,8 +513,6 @@ class QnAEngine:
         output_format: Optional[OutputFormatType] = None,
         embedding_type: EmbeddingType = "openai",
         embedding_api_key: Optional[str] = None,
-        max_retries: int = 3,
-        batch_size: int = 5,
         **kwargs
     ) -> Any:
         content = self._load_data(source, source_type)
@@ -565,7 +563,6 @@ class QnAEngine:
             results = qa_chain.invoke({"query": query})
 
             try:
-                # Try to parse the raw JSON first
                 import json
                 raw_questions = json.loads(results["result"])
                 if 'questions' in raw_questions:
@@ -575,11 +572,10 @@ class QnAEngine:
                         if all(key in q for key in ['question', 'answer', 'options'])
                         and isinstance(q['options'], list)
                         and len(q['options']) > 0
-                    ]
+                    ][:num]  # Limit to requested number of questions
                     
-                    # Create a new JSON with only valid questions
-                    cleaned_results = json.dumps({"questions": valid_questions})
-                    structured_output = parser.parse(cleaned_results)
+                    # Create output with valid questions
+                    structured_output = parser.parse(json.dumps({"questions": valid_questions}))
                     
                     if output_format:
                         return self._handle_output_format(structured_output, output_format)
@@ -587,16 +583,14 @@ class QnAEngine:
                     return structured_output
 
             except json.JSONDecodeError as je:
-                print(f"JSON parsing error: {str(je)}")
-                print("Raw output:", results["result"])
+                print(f"Error parsing JSON response: {str(je)}")
             except Exception as e:
                 print(f"Error processing questions: {str(e)}")
-                print("Raw output:", results["result"])
 
         except Exception as e:
             print(f"Error in RAG question generation: {str(e)}")
         
-        # Return empty model instance if all attempts fail
+        # Return empty model instance if generation fails
         return response_model(questions=[]) if response_model else model(questions=[])
 
     def generate_similar_options(self, question, correct_answer, num_options=3):
