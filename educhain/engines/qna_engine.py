@@ -87,6 +87,36 @@ VISUAL_QUESTION_PROMPT_TEMPLATE = """Generate exactly {num} quantitative questio
         }}
 """
 
+DATA_SOURCE_PROMPT_TEMPLATE = """
+Analyze the following content and generate {num} {question_type} questions.
+
+Source Type: {source_type}
+Content Length: {content_length} characters
+
+Guidelines for Question Generation:
+1. Focus on key concepts and important information from the content
+2. Ensure questions are directly based on the provided content
+3. Vary the difficulty level of questions
+4. Avoid redundant or overlapping questions
+5. Create clear and unambiguous questions
+6. Include relevant context where necessary
+
+Content:
+{topic}
+
+{base_template}
+
+Additional Context:
+{custom_instructions}
+
+Requirements:
+1. Generate exactly {num} questions
+2. Follow the specified question type format: {question_type}
+3. Ensure all questions are factually accurate
+4. Provide clear explanations for answers
+
+{format_instructions}
+"""
 
 class QnAEngine:
     def __init__(self, llm_config: Optional[LLMConfig] = None):
@@ -390,19 +420,97 @@ class QnAEngine:
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
         output_format: Optional[OutputFormatType] = None,
+        max_content_length: int = 10000,
         **kwargs
     ) -> Any:
-        content = self._load_data(source, source_type)
-        return self.generate_questions(
-            topic=content,
-            num=num,
-            question_type=question_type,
-            prompt_template=prompt_template,
-            custom_instructions=custom_instructions,
-            response_model=response_model,
-            output_format=output_format,
-            **kwargs
-        )
+        """
+        Generate questions from various data sources with improved handling and validation.
+        
+        Args:
+            source: The source content or path
+            source_type: Type of source ('text', 'pdf', 'url')
+            num: Number of questions to generate
+            question_type: Type of questions to generate
+            prompt_template: Optional custom prompt template
+            custom_instructions: Additional instructions for generation
+            response_model: Custom response model class
+            output_format: Desired output format
+            max_content_length: Maximum content length to process
+            **kwargs: Additional parameters
+        """
+        if not source:
+            raise ValueError("Source cannot be empty")
+        if num <= 0:
+            raise ValueError("Number of questions must be positive")
+            
+        try:
+            # Load and preprocess content
+            content = self._load_data(source, source_type)
+            
+            if not content or len(content.strip()) == 0:
+                raise ValueError(f"No content loaded from {source_type} source")
+                
+            # Truncate content if too long
+            content_length = len(content)
+            if content_length > max_content_length:
+                logging.warning(f"Content length ({content_length}) exceeds maximum ({max_content_length}). Truncating...")
+                content = content[:max_content_length]
+                content_length = max_content_length
+
+            # Get parser and base template
+            parser, model = self._get_parser_and_model(question_type, response_model)
+            base_template = self._get_prompt_template(question_type, prompt_template)
+            format_instructions = parser.get_format_instructions()
+
+            # Use the data source specific prompt template
+            source_prompt = PromptTemplate(
+                template=DATA_SOURCE_PROMPT_TEMPLATE,
+                input_variables=[
+                    "num",
+                    "question_type",
+                    "source_type",
+                    "content_length",
+                    "topic",
+                    "base_template",
+                    "custom_instructions",
+                    "format_instructions"
+                ]
+            )
+
+            # Format the prompt with all necessary information
+            formatted_prompt = source_prompt.format(
+                num=num,
+                question_type=question_type,
+                source_type=source_type,
+                content_length=content_length,
+                topic=content,
+                base_template=base_template if base_template else "",
+                custom_instructions=custom_instructions if custom_instructions else "No additional instructions provided.",
+                format_instructions=format_instructions
+            )
+
+            # Generate questions using the formatted prompt
+            result = self.generate_questions(
+                topic=formatted_prompt,
+                num=num,
+                question_type=question_type,
+                response_model=response_model,
+                output_format=output_format,
+                **kwargs
+            )
+            
+            if not result or (hasattr(result, 'questions') and len(result.questions) == 0):
+                logging.warning("No questions were generated")
+                
+            return result
+            
+        except Exception as e:
+            logging.error(f"Error in generate_questions_from_data: {str(e)}")
+            if response_model:
+                return response_model(questions=[])
+            else:
+                model = self._get_parser_and_model(question_type)[1]
+                return model(questions=[])
 
     def generate_questions_with_rag(
         self,

@@ -138,3 +138,113 @@ class SpeechInstructions(BaseModel):
     custom_instructions: Optional[str] = None
     detected_language: Optional[str] = "english"
 
+class RAGQuestion(BaseQuestion):
+    """Model for questions generated using RAG (Retrieval Augmented Generation)"""
+    source_context: Optional[str] = Field(
+        default=None,
+        description="The relevant context from which this question was generated"
+    )
+    confidence_score: Optional[float] = Field(
+        default=None,
+        description="Confidence score for the generated question (0-1)"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Additional metadata about the question generation"
+    )
+
+    def show(self):
+        print(f"Question: {self.question}")
+        if isinstance(self.options, list):
+            options_str = "\n".join(f"  {chr(65 + i)}. {option}" for i, option in enumerate(self.options))
+            print(f"Options:\n{options_str}")
+        print(f"\nCorrect Answer: {self.answer}")
+        if self.explanation:
+            print(f"Explanation: {self.explanation}")
+        if self.source_context:
+            print(f"\nSource Context: {self.source_context}")
+        if self.confidence_score is not None:
+            print(f"Confidence Score: {self.confidence_score:.2f}")
+        print()
+
+class RAGQuestionList(QuestionList):
+    """List of questions generated using RAG"""
+    questions: List[RAGQuestion]
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Metadata about the overall question generation process"
+    )
+
+    def show(self):
+        if self.metadata:
+            print("=== Generation Metadata ===")
+            for key, value in self.metadata.items():
+                print(f"{key}: {value}")
+            print()
+        
+        for i, question in enumerate(self.questions, 1):
+            print(f"Question {i}:")
+            question.show()
+
+class DataSourceQuestion(BaseQuestion):
+    """Model for questions generated from specific data sources"""
+    source_type: str = Field(
+        description="Type of source the question was generated from (pdf, url, text)"
+    )
+    source_location: Optional[str] = Field(
+        default=None,
+        description="Location or identifier of the source"
+    )
+    content_segment: Optional[str] = Field(
+        default=None,
+        description="Relevant segment of the source content"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Additional metadata about the question and its source"
+    )
+
+    def show(self):
+        print(f"Question: {self.question}")
+        if isinstance(self.options, list):
+            options_str = "\n".join(f"  {chr(65 + i)}. {option}" for i, option in enumerate(self.options))
+            print(f"Options:\n{options_str}")
+        print(f"\nCorrect Answer: {self.answer}")
+        if self.explanation:
+            print(f"Explanation: {self.explanation}")
+        print(f"\nSource Type: {self.source_type}")
+        if self.source_location:
+            print(f"Source: {self.source_location}")
+        if self.content_segment:
+            print(f"\nRelevant Content:\n{self.content_segment}")
+        print()
+
+class DataSourceQuestionList(QuestionList):
+    """List of questions generated from data sources"""
+    questions: List[DataSourceQuestion]
+    source_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadata about the source and generation process"
+    )
+    processing_stats: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Statistics about the content processing"
+    )
+
+    def show(self):
+        if self.source_metadata:
+            print("=== Source Information ===")
+            for key, value in self.source_metadata.items():
+                print(f"{key}: {value}")
+            print()
+            
+        if self.processing_stats:
+            print("=== Processing Statistics ===")
+            for key, value in self.processing_stats.items():
+                print(f"{key}: {value}")
+            print()
+        
+        for i, question in enumerate(self.questions, 1):
+            print(f"Question {i}:")
+            question.show()
+
