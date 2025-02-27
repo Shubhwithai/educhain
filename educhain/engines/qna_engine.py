@@ -542,25 +542,70 @@ class QnAEngine:
             vector_store = self._create_vector_store(content)
             qa_chain = self._setup_retrieval_qa(vector_store)
             
+            # Create RAG-specific prompt template
+            rag_prompt = f"""
+            Generate a {question_type} question based on the following content.
+            
+            Content: {{query}}
+            
+            The response should be in JSON format with the following structure:
+            {{
+                "question": "the question text",
+                "answer": "the correct answer",
+                "explanation": "detailed explanation",
+                "options": ["option1", "option2", "option3", "option4"] // for Multiple Choice only
+            }}
+            
+            Requirements:
+            1. Question should be clear and specific
+            2. Answer should be accurate and based on the content
+            3. Provide a detailed explanation
+            4. For Multiple Choice, include 4 distinct options
+            
+            {custom_instructions if custom_instructions else ''}
+            """
+            
             # Generate questions using RAG
             questions = []
             for _ in range(num):
                 try:
                     # Get relevant context using RAG
                     retrieval_result = qa_chain.invoke({
-                        "query": f"Generate a {question_type} question about: {content[:200]}..."
+                        "query": rag_prompt.format(query=content[:500])  # Use first 500 chars as context
                     })
                     
+                    # Parse the result - it comes as a string, so we need to extract the JSON part
+                    import json
+                    import re
+                    
+                    # Try to extract JSON from the result
+                    json_match = re.search(r'\{.*\}', retrieval_result['result'], re.DOTALL)
+                    if json_match:
+                        question_data = json.loads(json_match.group())
+                    else:
+                        raise ValueError("No valid JSON found in response")
+                    
                     # Create question with source information
-                    question = SourceMCQ(
-                        question=retrieval_result["question"],
-                        answer=retrieval_result["answer"],
-                        explanation=retrieval_result.get("explanation"),
-                        options=retrieval_result.get("options", []),
-                        source_type=source_type,
-                        source_context=retrieval_result.get("context"),
-                        metadata={"retrieval_score": retrieval_result.get("score", 0.0)}
-                    )
+                    if question_type == "Multiple Choice":
+                        question = SourceMCQ(
+                            question=question_data["question"],
+                            answer=question_data["answer"],
+                            explanation=question_data.get("explanation", ""),
+                            options=question_data.get("options", []),
+                            source_type=source_type,
+                            source_context=retrieval_result.get("context", ""),
+                            metadata={"retrieval_score": retrieval_result.get("score", 0.0)}
+                        )
+                    else:
+                        question = BaseSourceQuestion(
+                            question=question_data["question"],
+                            answer=question_data["answer"],
+                            explanation=question_data.get("explanation", ""),
+                            source_type=source_type,
+                            source_context=retrieval_result.get("context", ""),
+                            metadata={"retrieval_score": retrieval_result.get("score", 0.0)}
+                        )
+                    
                     questions.append(question)
                     
                 except Exception as e:
