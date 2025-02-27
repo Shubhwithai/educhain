@@ -221,3 +221,32 @@ class DataSourceMCQ(DataSourceQuestion):
         if self.content_segment:
             print(f"\nRelevant Content:\n{self.content_segment}")
         print()
+
+class DataSourceQuestionList(QuestionList):
+    """List of questions generated from data sources"""
+    questions: List[str]
+    source_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadata about the source and generation process"
+    )
+    processing_stats: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Statistics about the content processing"
+    )
+
+    def show(self):
+        if self.source_metadata:
+            print("=== Source Information ===")
+            for key, value in self.source_metadata.items():
+                print(f"{key}: {value}")
+            print()
+            
+        if self.processing_stats:
+            print("=== Processing Statistics ===")
+            for key, value in self.processing_stats.items():
+                print(f"{key}: {value}")
+            print()
+        
+        for i, question in enumerate(self.questions, 1):
+            print(f"Question {i}:")
+            question.show()
