@@ -18,7 +18,8 @@ from educhain.core.config import LLMConfig
 from educhain.models.qna_models import (
     MCQList, ShortAnswerQuestionList, TrueFalseQuestionList,
     FillInBlankQuestionList, MCQListMath, Option ,SolvedDoubt, SpeechInstructions,
-    VisualMCQList, VisualMCQ, DataSourceMCQList
+    VisualMCQList, VisualMCQ, DataSourceMCQList, RAGQuestion, RAGQuestionList,
+    BaseSourceQuestion, SourceMCQ, SourceQuestionList, SourceMCQList
 )
 from educhain.utils.loaders import PdfFileLoader, UrlLoader
 from educhain.utils.output_formatter import OutputFormatter
@@ -419,18 +420,15 @@ class QnAEngine:
         prompt_template: Optional[str] = None,
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
-        output_format: Optional[OutputFormatType] = None,
-        max_content_length: int = 10000,
         **kwargs
     ) -> Any:
-        """
-        Generate questions from various data sources with improved handling and validation.
-        """
-        if not source:
-            raise ValueError("Source cannot be empty")
-        if num <= 0:
-            raise ValueError("Number of questions must be positive")
-            
+        """Generate questions from data sources with simplified response model"""
+        start_time = time.time()
+        
+        # Set default response model based on question type
+        if response_model is None:
+            response_model = SourceMCQList if question_type == "Multiple Choice" else SourceQuestionList
+        
         try:
             # Load and preprocess content
             content = self._load_data(source, source_type)
@@ -440,90 +438,44 @@ class QnAEngine:
                 
             # Truncate content if too long
             content_length = len(content)
-            if content_length > max_content_length:
-                logging.warning(f"Content length ({content_length}) exceeds maximum ({max_content_length}). Truncating...")
-                content = content[:max_content_length]
-                content_length = max_content_length
+            if content_length > 10000:
+                logging.warning(f"Content length ({content_length}) exceeds maximum (10000). Truncating...")
+                content = content[:10000]
+                content_length = 10000
 
-            # Set default response model to DataSourceMCQList for Multiple Choice questions
-            if question_type == "Multiple Choice" and response_model is None:
-                response_model = DataSourceMCQList
-
-            # Get parser and base template
-            parser, model = self._get_parser_and_model(question_type, response_model)
-            base_template = self._get_prompt_template(question_type, prompt_template)
-            format_instructions = parser.get_format_instructions()
-
-            # Use the data source specific prompt template
-            source_prompt = PromptTemplate(
-                template=DATA_SOURCE_PROMPT_TEMPLATE,
-                input_variables=[
-                    "num",
-                    "question_type",
-                    "source_type",
-                    "content_length",
-                    "topic",
-                    "base_template",
-                    "custom_instructions",
-                    "format_instructions"
-                ]
-            )
-
-            # Format the prompt with all necessary information
-            formatted_prompt = source_prompt.format(
-                num=num,
-                question_type=question_type,
-                source_type=source_type,
-                content_length=content_length,
-                topic=content,
-                base_template=base_template if base_template else "",
-                custom_instructions=custom_instructions if custom_instructions else "No additional instructions provided.",
-                format_instructions=format_instructions
-            )
-
-            # Generate questions using the formatted prompt
-            start_time = time.time()
+            # Generate questions
             result = self.generate_questions(
-                topic=formatted_prompt,
+                topic=content,
                 num=num,
                 question_type=question_type,
+                prompt_template=prompt_template,
+                custom_instructions=custom_instructions,
                 response_model=response_model,
-                output_format=output_format,
                 **kwargs
             )
-
-            # Add source metadata and processing stats for DataSourceMCQList
-            if isinstance(result, DataSourceMCQList):
-                result.source_metadata = {
+            
+            # Add generation statistics
+            if isinstance(result, SourceQuestionList):
+                result.generation_stats = {
                     "source_type": source_type,
-                    "content_length": content_length,
-                    "generation_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "content_length": len(content),
+                    "generation_time": f"{time.time() - start_time:.2f}s",
+                    "num_questions": len(result.questions)
                 }
                 
-                result.processing_stats = {
-                    "processing_time": f"{time.time() - start_time:.2f}s",
-                    "num_questions_generated": len(result.questions),
-                }
-
                 # Add source information to each question
                 for question in result.questions:
                     question.source_type = source_type
-                    question.source_location = getattr(source, 'name', str(source))
-                    # Extract relevant content segment (e.g., the sentence or paragraph containing the answer)
-                    question.content_segment = self._extract_relevant_segment(content, question.answer)
+                    question.source_context = self._extract_relevant_segment(
+                        content, 
+                        question.answer
+                    )
             
-            if not result or (hasattr(result, 'questions') and len(result.questions) == 0):
-                logging.warning("No questions were generated")
-                
             return result
             
         except Exception as e:
             logging.error(f"Error in generate_questions_from_data: {str(e)}")
-            if response_model:
-                return response_model(questions=[])
-            else:
-                model = self._get_parser_and_model(question_type)[1]
-                return model(questions=[])
+            return response_model(questions=[])
 
     def _extract_relevant_segment(self, content: str, answer: str, context_chars: int = 200) -> str:
         """
@@ -571,127 +523,67 @@ class QnAEngine:
         prompt_template: Optional[str] = None,
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
-        learning_objective: str = "",
-        difficulty_level: str = "",
-        output_format: Optional[OutputFormatType] = None,
         **kwargs
     ) -> Any:
-       
-        # Initialize embeddings if not already done
-        if self.embeddings is None:
-            self.embeddings = OpenAIEmbeddings()
+        """Generate questions using RAG with simplified response model"""
+        start_time = time.time()
+        
+        # Set default response model based on question type
+        if response_model is None:
+            response_model = SourceMCQList if question_type == "Multiple Choice" else SourceQuestionList
+        
+        try:
+            # Initialize embeddings and load content
+            if self.embeddings is None:
+                self.embeddings = OpenAIEmbeddings()
+            content = self._load_data(source, source_type)
             
-        # Load content using the existing loader method
-        content = self._load_data(source, source_type)
-        
-        # Create vector store using the existing method
-        vector_store = self._create_vector_store(content)
-        
-        # Set up retrieval QA chain using the existing method
-        qa_chain = self._setup_retrieval_qa(vector_store)
-        
-        # Get appropriate parser and model based on question type
-        parser, model = self._get_parser_and_model(question_type, response_model)
-        format_instructions = parser.get_format_instructions()
-        
-        # Get base prompt template if not provided
-        if prompt_template is None:
-            prompt_template = self._get_prompt_template(question_type)
-        
-        # Construct full prompt with learning objectives and difficulty
-        full_prompt = f"""
-        Generate {num} {question_type} questions based on the following content:
-        
-        {{topic}}
-        
-        Learning Objective: {{learning_objective}}
-        Difficulty Level: {{difficulty_level}}
-        
-        Ensure that the questions:
-        1. Are directly relevant to the learning objective
-        2. Match the specified difficulty level
-        3. Test understanding rather than mere recall
-        4. Are clear, unambiguous, and grammatically correct
-        5. For multiple choice questions, include plausible distractors
-        
-        {{format_instructions}}
-        """
-        
-        # Add custom instructions if provided
-        if custom_instructions:
-            full_prompt += f"\n\nAdditional Instructions:\n{{custom_instructions}}"
-        
-        # Create prompt template
-        question_prompt = PromptTemplate(
-            input_variables=["topic", "learning_objective", "difficulty_level", "custom_instructions"],
-            template=full_prompt,
-            partial_variables={"format_instructions": format_instructions}
-        )
-        
-        # Use the TextSplitter to chunk content if it's too large
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-        chunks = text_splitter.split_text(content)
-        
-        all_results = []
-        total_questions = 0
-        
-        # Process chunks until we have enough questions
-        for i, chunk in enumerate(chunks):
-            if total_questions >= num:
-                break
-                
-            # Calculate how many questions to request from this chunk
-            questions_needed = min(num - total_questions, max(1, num // len(chunks) + 1))
+            # Create vector store and QA chain
+            vector_store = self._create_vector_store(content)
+            qa_chain = self._setup_retrieval_qa(vector_store)
             
-            # Format the prompt with current chunk
-            query = question_prompt.format(
-                topic=chunk,
-                learning_objective=learning_objective,
-                difficulty_level=difficulty_level,
-                custom_instructions=custom_instructions or "",
-                **kwargs
+            # Generate questions using RAG
+            questions = []
+            for _ in range(num):
+                try:
+                    # Get relevant context using RAG
+                    retrieval_result = qa_chain.invoke({
+                        "query": f"Generate a {question_type} question about: {content[:200]}..."
+                    })
+                    
+                    # Create question with source information
+                    question = SourceMCQ(
+                        question=retrieval_result["question"],
+                        answer=retrieval_result["answer"],
+                        explanation=retrieval_result.get("explanation"),
+                        options=retrieval_result.get("options", []),
+                        source_type=source_type,
+                        source_context=retrieval_result.get("context"),
+                        metadata={"retrieval_score": retrieval_result.get("score", 0.0)}
+                    )
+                    questions.append(question)
+                    
+                except Exception as e:
+                    logging.warning(f"Error generating question: {str(e)}")
+                    continue
+            
+            # Create final result
+            result = response_model(
+                questions=questions,
+                generation_stats={
+                    "source_type": source_type,
+                    "content_length": len(content),
+                    "generation_time": f"{time.time() - start_time:.2f}s",
+                    "num_questions": len(questions),
+                    "success_rate": f"{len(questions)/num:.2%}"
+                }
             )
             
-            # Retrieve context and generate questions
-            try:
-                retrieval_results = qa_chain.invoke({
-                    "query": query, 
-                    "n_results": min(3, len(chunks))  # Adjust based on content size
-                })
-                
-                # Parse the results
-                chunk_results = parser.parse(retrieval_results["result"])
-                
-                # Extract questions from the result
-                if hasattr(chunk_results, "questions"):
-                    questions = chunk_results.questions
-                elif isinstance(chunk_results, list):
-                    questions = chunk_results
-                else:
-                    questions = [chunk_results]
-                
-                all_results.extend(questions)
-                total_questions += len(questions)
-                
-            except Exception as e:
-                # Add import for logger if not already present
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.warning(f"Error processing chunk {i}: {str(e)}")
-                # Continue with next chunk instead of failing
-                continue
-        
-        # Limit to requested number of questions
-        final_results = all_results[:num]
-        
-        # Create the structured output
-        structured_output = model(questions=final_results)
-        
-        # Handle output format if specified
-        if output_format:
-            return self._handle_output_format(structured_output, output_format)
+            return result
             
-        return structured_output
+        except Exception as e:
+            logging.error(f"Error in generate_questions_with_rag: {str(e)}")
+            return response_model(questions=[])
 
 
     def generate_similar_options(self, question, correct_answer, num_options=3):

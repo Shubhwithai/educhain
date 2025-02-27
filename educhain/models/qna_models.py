@@ -148,6 +148,22 @@ class RAGQuestion(BaseQuestion):
         default=None,
         description="Confidence score for the generated question (0-1)"
     )
+    difficulty_level: Optional[str] = Field(
+        default=None,
+        description="Difficulty level of the question"
+    )
+    learning_objective: Optional[str] = Field(
+        default=None,
+        description="Learning objective this question addresses"
+    )
+    chunk_index: Optional[int] = Field(
+        default=None,
+        description="Index of the content chunk used to generate this question"
+    )
+    options: List[str] = Field(
+        default_factory=list,
+        description="List of options for multiple choice questions"
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         default_factory=dict,
         description="Additional metadata about the question generation"
@@ -155,12 +171,16 @@ class RAGQuestion(BaseQuestion):
 
     def show(self):
         print(f"Question: {self.question}")
-        if isinstance(self.options, list):
+        if self.options:
             options_str = "\n".join(f"  {chr(65 + i)}. {option}" for i, option in enumerate(self.options))
             print(f"Options:\n{options_str}")
         print(f"\nCorrect Answer: {self.answer}")
         if self.explanation:
             print(f"Explanation: {self.explanation}")
+        if self.difficulty_level:
+            print(f"Difficulty: {self.difficulty_level}")
+        if self.learning_objective:
+            print(f"Learning Objective: {self.learning_objective}")
         if self.source_context:
             print(f"\nSource Context: {self.source_context}")
         if self.confidence_score is not None:
@@ -170,20 +190,39 @@ class RAGQuestion(BaseQuestion):
 class RAGQuestionList(QuestionList):
     """List of questions generated using RAG"""
     questions: List[RAGQuestion]
-    metadata: Optional[Dict[str, Any]] = Field(
+    metadata: Dict[str, Any] = Field(
         default_factory=dict,
         description="Metadata about the overall question generation process"
     )
+    retrieval_stats: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Statistics about the retrieval process"
+    )
+    generation_config: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Configuration used for generation"
+    )
 
     def show(self):
+        print("=== RAG Question Generation Report ===")
         if self.metadata:
-            print("=== Generation Metadata ===")
+            print("\n=== Generation Metadata ===")
             for key, value in self.metadata.items():
                 print(f"{key}: {value}")
-            print()
+        
+        if self.retrieval_stats:
+            print("\n=== Retrieval Statistics ===")
+            for key, value in self.retrieval_stats.items():
+                print(f"{key}: {value}")
+        
+        if self.generation_config:
+            print("\n=== Generation Configuration ===")
+            for key, value in self.generation_config.items():
+                print(f"{key}: {value}")
+        print("\n=== Generated Questions ===")
         
         for i, question in enumerate(self.questions, 1):
-            print(f"Question {i}:")
+            print(f"\nQuestion {i}:")
             question.show()
 
 class DataSourceQuestion(BaseQuestion):
@@ -312,3 +351,66 @@ class DataSourceMCQList(MCQList):
         for i, question in enumerate(self.questions, 1):
             print(f"Question {i}:")
             question.show()
+
+class BaseSourceQuestion(BaseQuestion):
+    """Base model for questions generated from any source (RAG or direct data)"""
+    source_type: str = Field(
+        description="Type of source (pdf, url, text)"
+    )
+    source_context: Optional[str] = Field(
+        default=None,
+        description="Relevant context or segment from source"
+    )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional metadata about the question"
+    )
+
+    def show(self):
+        print(f"Question: {self.question}")
+        print(f"Answer: {self.answer}")
+        if self.explanation:
+            print(f"Explanation: {self.explanation}")
+        print(f"Source Type: {self.source_type}")
+        if self.source_context:
+            print(f"Context: {self.source_context}")
+        print()
+
+class SourceMCQ(BaseSourceQuestion):
+    """Multiple Choice Question with source information"""
+    options: List[str]
+    
+    def show(self):
+        print(f"Question: {self.question}")
+        for i, option in enumerate(self.options):
+            print(f"  {chr(65 + i)}. {option}")
+        print(f"\nCorrect Answer: {self.answer}")
+        if self.explanation:
+            print(f"Explanation: {self.explanation}")
+        print(f"Source Type: {self.source_type}")
+        if self.source_context:
+            print(f"Context: {self.source_context}")
+        print()
+
+class SourceQuestionList(QuestionList):
+    """Base list model for questions generated from any source"""
+    questions: List[BaseSourceQuestion]
+    generation_stats: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Statistics about the generation process"
+    )
+
+    def show(self):
+        if self.generation_stats:
+            print("=== Generation Statistics ===")
+            for key, value in self.generation_stats.items():
+                print(f"{key}: {value}")
+            print()
+        
+        for i, question in enumerate(self.questions, 1):
+            print(f"\nQuestion {i}:")
+            question.show()
+
+class SourceMCQList(SourceQuestionList):
+    """List of Multiple Choice Questions from any source"""
+    questions: List[SourceMCQ]
