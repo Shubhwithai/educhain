@@ -10,7 +10,7 @@ setup(
         "langchain-openai==0.3.7",
         "openai==1.64.0",
         "python-dotenv==1.0.1", 
-        "pandas==2.2.2",
+        "pandas",
         "reportlab==4.3.1",
         "PyPDF2",
         "beautifulsoup4",
