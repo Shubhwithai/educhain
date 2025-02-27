@@ -18,7 +18,7 @@ from educhain.core.config import LLMConfig
 from educhain.models.qna_models import (
     MCQList, ShortAnswerQuestionList, TrueFalseQuestionList,
     FillInBlankQuestionList, MCQListMath, Option ,SolvedDoubt, SpeechInstructions,
-    VisualMCQList, VisualMCQ
+    VisualMCQList, VisualMCQ, DataSourceMCQList
 )
 from educhain.utils.loaders import PdfFileLoader, UrlLoader
 from educhain.utils.output_formatter import OutputFormatter
@@ -425,18 +425,6 @@ class QnAEngine:
     ) -> Any:
         """
         Generate questions from various data sources with improved handling and validation.
-        
-        Args:
-            source: The source content or path
-            source_type: Type of source ('text', 'pdf', 'url')
-            num: Number of questions to generate
-            question_type: Type of questions to generate
-            prompt_template: Optional custom prompt template
-            custom_instructions: Additional instructions for generation
-            response_model: Custom response model class
-            output_format: Desired output format
-            max_content_length: Maximum content length to process
-            **kwargs: Additional parameters
         """
         if not source:
             raise ValueError("Source cannot be empty")
@@ -456,6 +444,10 @@ class QnAEngine:
                 logging.warning(f"Content length ({content_length}) exceeds maximum ({max_content_length}). Truncating...")
                 content = content[:max_content_length]
                 content_length = max_content_length
+
+            # Set default response model to DataSourceMCQList for Multiple Choice questions
+            if question_type == "Multiple Choice" and response_model is None:
+                response_model = DataSourceMCQList
 
             # Get parser and base template
             parser, model = self._get_parser_and_model(question_type, response_model)
@@ -490,6 +482,7 @@ class QnAEngine:
             )
 
             # Generate questions using the formatted prompt
+            start_time = time.time()
             result = self.generate_questions(
                 topic=formatted_prompt,
                 num=num,
@@ -498,6 +491,26 @@ class QnAEngine:
                 output_format=output_format,
                 **kwargs
             )
+
+            # Add source metadata and processing stats for DataSourceMCQList
+            if isinstance(result, DataSourceMCQList):
+                result.source_metadata = {
+                    "source_type": source_type,
+                    "content_length": content_length,
+                    "generation_timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                
+                result.processing_stats = {
+                    "processing_time": f"{time.time() - start_time:.2f}s",
+                    "num_questions_generated": len(result.questions),
+                }
+
+                # Add source information to each question
+                for question in result.questions:
+                    question.source_type = source_type
+                    question.source_location = getattr(source, 'name', str(source))
+                    # Extract relevant content segment (e.g., the sentence or paragraph containing the answer)
+                    question.content_segment = self._extract_relevant_segment(content, question.answer)
             
             if not result or (hasattr(result, 'questions') and len(result.questions) == 0):
                 logging.warning("No questions were generated")
@@ -511,6 +524,43 @@ class QnAEngine:
             else:
                 model = self._get_parser_and_model(question_type)[1]
                 return model(questions=[])
+
+    def _extract_relevant_segment(self, content: str, answer: str, context_chars: int = 200) -> str:
+        """
+        Extract relevant content segment around the answer.
+        
+        Args:
+            content: Full content text
+            answer: Answer to look for
+            context_chars: Number of characters of context to include before and after
+        
+        Returns:
+            str: Relevant content segment
+        """
+        try:
+            # Find the position of the answer in the content
+            answer_pos = content.lower().find(answer.lower())
+            if answer_pos == -1:
+                return ""
+            
+            # Calculate start and end positions for the segment
+            start = max(0, answer_pos - context_chars)
+            end = min(len(content), answer_pos + len(answer) + context_chars)
+            
+            # Extract the segment
+            segment = content[start:end].strip()
+            
+            # Add ellipsis if we're not at the start/end of the content
+            if start > 0:
+                segment = "..." + segment
+            if end < len(content):
+                segment = segment + "..."
+                
+            return segment
+            
+        except Exception as e:
+            logging.warning(f"Error extracting relevant segment: {str(e)}")
+            return ""
 
     def generate_questions_with_rag(
         self,

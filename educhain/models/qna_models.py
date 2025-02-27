@@ -250,3 +250,65 @@ class DataSourceQuestionList(QuestionList):
         for i, question in enumerate(self.questions, 1):
             print(f"Question {i}:")
             question.show()
+
+class DataSourceMultipleChoiceQuestion(MultipleChoiceQuestion):
+    """Multiple Choice Question with data source information"""
+    source_type: str = Field(
+        description="Type of source the question was generated from (pdf, url, text)"
+    )
+    source_location: Optional[str] = Field(
+        default=None,
+        description="Location or identifier of the source"
+    )
+    content_segment: Optional[str] = Field(
+        default=None,
+        description="Relevant segment of the source content"
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Additional metadata about the question and its source"
+    )
+
+    def show(self):
+        # First show the basic MCQ information
+        super().show()
+        # Then show the source information
+        print(f"Source Type: {self.source_type}")
+        if self.source_location:
+            print(f"Source: {self.source_location}")
+        if self.content_segment:
+            print(f"Relevant Content:\n{self.content_segment}")
+        if self.metadata:
+            print("Additional Metadata:")
+            for key, value in self.metadata.items():
+                print(f"  {key}: {value}")
+        print()
+
+class DataSourceMCQList(MCQList):
+    """List of Multiple Choice Questions from data sources"""
+    questions: List[DataSourceMultipleChoiceQuestion]
+    source_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadata about the source and generation process"
+    )
+    processing_stats: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Statistics about the content processing"
+    )
+
+    def show(self):
+        if self.source_metadata:
+            print("=== Source Information ===")
+            for key, value in self.source_metadata.items():
+                print(f"{key}: {value}")
+            print()
+            
+        if self.processing_stats:
+            print("=== Processing Statistics ===")
+            for key, value in self.processing_stats.items():
+                print(f"{key}: {value}")
+            print()
+        
+        for i, question in enumerate(self.questions, 1):
+            print(f"Question {i}:")
+            question.show()
