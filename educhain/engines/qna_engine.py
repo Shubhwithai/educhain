@@ -32,6 +32,8 @@ import pandas as pd
 import dataframe_image as dfi
 from IPython.display import display, HTML
 
+import logging
+import time
 
 import random
 
@@ -88,6 +90,7 @@ VISUAL_QUESTION_PROMPT_TEMPLATE = """Generate exactly {num} quantitative questio
         }}
 """
 
+logger = logging.getLogger(__name__)
 
 class QnAEngine:
     def __init__(self, llm_config: Optional[LLMConfig] = None):
@@ -411,70 +414,140 @@ class QnAEngine:
         source: str,
         source_type: str,
         num: int,
+        learning_objective: str,
+        difficulty_level: str,
         question_type: QuestionType = "Multiple Choice",
         prompt_template: Optional[str] = None,
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
-        learning_objective: str = "",
-        difficulty_level: str = "",
         output_format: Optional[OutputFormatType] = None,
         **kwargs
     ) -> Any:
-        if self.embeddings is None:
-            self.embeddings = OpenAIEmbeddings()
-
-        content = self._load_data(source, source_type)
-
-        vector_store = self._create_vector_store(content)
-        qa_chain = self._setup_retrieval_qa(vector_store)
-
-        parser, model = self._get_parser_and_model(question_type, response_model)
-        format_instructions = parser.get_format_instructions()
-
-        template = self._get_prompt_template(question_type, prompt_template)
-
-
-        prompt_template += """
-        Learning Objective: {learning_objective}
-        Difficulty Level: {difficulty_level}
-
-        Ensure that the questions are relevant to the learning objective and match the specified difficulty level.
-
-        The response should be in JSON format.
-        {format_instructions}
+        """Generate questions using RAG (Retrieval Augmented Generation).
+        
+        Args:
+            source: The source material to generate questions from
+            source_type: Type of the source material
+            num: Number of questions to generate
+            learning_objective: Required learning objective for the questions
+            difficulty_level: Required difficulty level for the questions
+            question_type: Type of questions to generate (default: Multiple Choice)
+            prompt_template: Optional custom prompt template
+            custom_instructions: Optional additional instructions
+            response_model: Optional custom response model
+            output_format: Optional output format specification
+            **kwargs: Additional keyword arguments
+        
+        Raises:
+            ValueError: If required parameters are empty or invalid
+            Exception: For other processing errors
+        
+        Returns:
+            Generated questions in the specified format
         """
-
-        if custom_instructions:
-            prompt_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
-
-        question_prompt = PromptTemplate(
-            input_variables=["num", "topic", "learning_objective", "difficulty_level"],
-            template=prompt_template,
-            partial_variables={"format_instructions": format_instructions}
-        )
-
-        query = question_prompt.format(
-            num=num,
-            topic=content[:1000],
-            learning_objective=learning_objective,
-            difficulty_level=difficulty_level,
-            **kwargs
-        )
-
-        results = qa_chain.invoke({"query": query, "n_results": 3})
-
         try:
-            structured_output = parser.parse(results["result"])
+            # Validate required parameters
+            if not learning_objective:
+                raise ValueError("learning_objective is required")
+            if not difficulty_level:
+                raise ValueError("difficulty_level is required")
+            if not source:
+                raise ValueError("source is required")
+            if num <= 0:
+                raise ValueError("num must be greater than 0")
 
-            if output_format:
-                self._handle_output_format(structured_output, output_format)
+            # Initialize embeddings if not already done
+            if self.embeddings is None:
+                self.embeddings = OpenAIEmbeddings()
 
+            # Load and prepare data
+            content = self._load_data(source, source_type)
+            if not content:
+                raise ValueError("No content loaded from source")
 
-            return structured_output
+            # Setup RAG components
+            vector_store = self._create_vector_store(content)
+            qa_chain = self._setup_retrieval_qa(vector_store)
+
+            # Get parser and model
+            parser, model = self._get_parser_and_model(question_type, response_model)
+            format_instructions = parser.get_format_instructions()
+
+            # Get and validate prompt template
+            template = self._get_prompt_template(question_type, prompt_template)
+            if template is None:
+                logger.warning(f"No template found for question type: {question_type}")
+                template = ""  # Default empty template if none found
+
+            # Build the complete prompt
+            full_template = f"""{template}
+            Learning Objective: {{learning_objective}}
+            Difficulty Level: {{difficulty_level}}
+
+            Generate {num} questions that:
+            1. Are directly related to the learning objective
+            2. Match the specified difficulty level
+            3. Are based on the provided content
+            4. Are clear and unambiguous
+            5. Have correct and well-explained answers
+
+            The response should be in JSON format.
+            {{format_instructions}}
+            """
+
+            if custom_instructions:
+                full_template += f"\n\nAdditional Instructions:\n{custom_instructions}"
+
+            # Create prompt template
+            question_prompt = PromptTemplate(
+                input_variables=["num", "topic", "learning_objective", "difficulty_level"],
+                template=full_template,
+                partial_variables={"format_instructions": format_instructions}
+            )
+
+            # Format the query with truncated content
+            MAX_CONTENT_LENGTH = 1000  # Configurable maximum content length
+            truncated_content = content[:MAX_CONTENT_LENGTH]
+            if len(content) > MAX_CONTENT_LENGTH:
+                logger.warning(f"Content truncated from {len(content)} to {MAX_CONTENT_LENGTH} characters")
+
+            query = question_prompt.format(
+                num=num,
+                topic=truncated_content,
+                learning_objective=learning_objective,
+                difficulty_level=difficulty_level,
+                **kwargs
+            )
+
+            # Get results from QA chain with retry logic
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    results = qa_chain.invoke({"query": query, "n_results": 3})
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise Exception(f"Failed to get results after {max_retries} attempts: {str(e)}")
+                    logger.warning(f"Attempt {attempt + 1} failed, retrying...")
+                    time.sleep(1)  # Add delay between retries
+
+            # Parse and format results
+            try:
+                structured_output = parser.parse(results["result"])
+                
+                if output_format:
+                    self._handle_output_format(structured_output, output_format)
+
+                return structured_output
+
+            except Exception as e:
+                logger.error(f"Error parsing output: {str(e)}")
+                logger.debug(f"Raw output: {results}")
+                return model()  # Return empty model instance on parsing failure
+
         except Exception as e:
-            print(f"Error parsing output in generate_questions_with_rag: {e}")
-            print("Raw output:", results)
-            return model()
+            logger.error(f"Error in generate_questions_with_rag: {str(e)}")
+            raise
 
     def generate_similar_options(self, question, correct_answer, num_options=3):
         llm = self.llm
