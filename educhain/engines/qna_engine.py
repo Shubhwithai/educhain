@@ -414,48 +414,17 @@ class QnAEngine:
         source: str,
         source_type: str,
         num: int,
-        learning_objective: str,
-        difficulty_level: str,
         question_type: QuestionType = "Multiple Choice",
         prompt_template: Optional[str] = None,
         custom_instructions: Optional[str] = None,
         response_model: Optional[Type[Any]] = None,
+        learning_objective: str = "",
+        difficulty_level: str = "",
         output_format: Optional[OutputFormatType] = None,
         **kwargs
     ) -> Any:
-        """Generate questions using RAG (Retrieval Augmented Generation).
-        
-        Args:
-            source: The source material to generate questions from
-            source_type: Type of the source material
-            num: Number of questions to generate
-            learning_objective: Required learning objective for the questions
-            difficulty_level: Required difficulty level for the questions
-            question_type: Type of questions to generate (default: Multiple Choice)
-            prompt_template: Optional custom prompt template
-            custom_instructions: Optional additional instructions
-            response_model: Optional custom response model
-            output_format: Optional output format specification
-            **kwargs: Additional keyword arguments
-        
-        Raises:
-            ValueError: If required parameters are empty or invalid
-            Exception: For other processing errors
-        
-        Returns:
-            Generated questions in the specified format
-        """
+        """Generate questions using RAG (Retrieval Augmented Generation)."""
         try:
-            # Validate required parameters
-            if not learning_objective:
-                raise ValueError("learning_objective is required")
-            if not difficulty_level:
-                raise ValueError("difficulty_level is required")
-            if not source:
-                raise ValueError("source is required")
-            if num <= 0:
-                raise ValueError("num must be greater than 0")
-
             # Initialize embeddings if not already done
             if self.embeddings is None:
                 self.embeddings = OpenAIEmbeddings()
@@ -476,21 +445,14 @@ class QnAEngine:
             # Get and validate prompt template
             template = self._get_prompt_template(question_type, prompt_template)
             if template is None:
-                logger.warning(f"No template found for question type: {question_type}")
-                template = ""  # Default empty template if none found
+                template = ""
 
             # Build the complete prompt
             full_template = f"""{template}
             Learning Objective: {{learning_objective}}
             Difficulty Level: {{difficulty_level}}
 
-            Generate {num} questions that:
-            1. Are directly related to the learning objective
-            2. Match the specified difficulty level
-            3. Are based on the provided content
-            4. Are clear and unambiguous
-            5. Have correct and well-explained answers
-
+            Generate {num} questions based on the provided content.
             The response should be in JSON format.
             {{format_instructions}}
             """
@@ -505,33 +467,18 @@ class QnAEngine:
                 partial_variables={"format_instructions": format_instructions}
             )
 
-            # Format the query with truncated content
-            MAX_CONTENT_LENGTH = 1000  # Configurable maximum content length
-            truncated_content = content[:MAX_CONTENT_LENGTH]
-            if len(content) > MAX_CONTENT_LENGTH:
-                logger.warning(f"Content truncated from {len(content)} to {MAX_CONTENT_LENGTH} characters")
-
+            # Format the query
             query = question_prompt.format(
                 num=num,
-                topic=truncated_content,
+                topic=content[:1000],  # Limit content length
                 learning_objective=learning_objective,
                 difficulty_level=difficulty_level,
                 **kwargs
             )
 
-            # Get results from QA chain with retry logic
-            max_retries = 3
-            for attempt in range(max_retries):
-                try:
-                    results = qa_chain.invoke({"query": query, "n_results": 3})
-                    break
-                except Exception as e:
-                    if attempt == max_retries - 1:
-                        raise Exception(f"Failed to get results after {max_retries} attempts: {str(e)}")
-                    logger.warning(f"Attempt {attempt + 1} failed, retrying...")
-                    time.sleep(1)  # Add delay between retries
+            # Get results from QA chain
+            results = qa_chain.invoke({"query": query, "n_results": 3})
 
-            # Parse and format results
             try:
                 structured_output = parser.parse(results["result"])
                 
@@ -543,7 +490,7 @@ class QnAEngine:
             except Exception as e:
                 logger.error(f"Error parsing output: {str(e)}")
                 logger.debug(f"Raw output: {results}")
-                return model()  # Return empty model instance on parsing failure
+                return model()
 
         except Exception as e:
             logger.error(f"Error in generate_questions_with_rag: {str(e)}")
