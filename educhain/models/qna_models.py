@@ -137,3 +137,12 @@ class SpeechInstructions(BaseModel):
     num_questions: Optional[int] = 5
     custom_instructions: Optional[str] = None
     detected_language: Optional[str] = "english"
+
+class GeneratedRAGQuestion(BaseModel):
+    question: str = Field(..., description="The generated question text")
+    options: List[str] = Field(..., description="List of answer options for the question")
+    answer: str = Field(..., description="The correct answer to the question")
+    explanation: Optional[str] = Field(None, description="Explanation for the correct answer")
+
+class GeneratedRAGQuestionsResponse(BaseModel):
+    questions: List[GeneratedRAGQuestion] = Field(..., description="List of generated questions")
