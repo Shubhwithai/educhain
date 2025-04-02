@@ -18,7 +18,7 @@ from educhain.core.config import LLMConfig
 from educhain.models.qna_models import (
     MCQList, ShortAnswerQuestionList, TrueFalseQuestionList,
     FillInBlankQuestionList, MCQListMath, Option ,SolvedDoubt, SpeechInstructions,
-    VisualMCQList, VisualMCQ, GeneratedRAGQuestionsResponse
+    VisualMCQList, VisualMCQ
 )
 from educhain.utils.loaders import PdfFileLoader, UrlLoader
 from educhain.utils.output_formatter import OutputFormatter
@@ -417,12 +417,12 @@ class QnAEngine:
         question_type: QuestionType = "Multiple Choice",
         prompt_template: Optional[str] = None,
         custom_instructions: Optional[str] = None,
-        response_model: Optional[Type[GeneratedRAGQuestionsResponse]] = None,
+        response_model: Optional[Type[Any]] = None,
         learning_objective: str = "",
         difficulty_level: str = "",
         output_format: Optional[OutputFormatType] = None,
         **kwargs
-    ) -> GeneratedRAGQuestionsResponse:
+    ) -> Any:
         """Generate questions using RAG (Retrieval Augmented Generation)."""
         try:
             # Initialize embeddings if not already done
@@ -485,7 +485,7 @@ class QnAEngine:
                 if output_format:
                     self._handle_output_format(structured_output, output_format)
 
-                return GeneratedRAGQuestionsResponse(questions=structured_output.questions)
+                return structured_output
 
             except Exception as e:
                 logger.error(f"Error parsing output: {str(e)}")
