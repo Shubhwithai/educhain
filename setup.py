@@ -2,15 +2,14 @@ from setuptools import setup, find_packages
 
 setup(
     name="educhain",
-    version="0.3.13",
+    version="0.4.0",
     packages=find_packages(),
     install_requires=[
-        "langchain",
-        "langchain-core",
-        "langchain-text-splitters",
-        "langchain-community",
-        "langchain-openai",
-        "langchain-classic",  # For deprecated RetrievalQA and other legacy chains
+        "langchain>=1.0.0",
+        "langchain-core>=1.0.0",
+        "langchain-text-splitters>=0.3.0",
+        "langchain-community>=0.3.0",
+        "langchain-openai>=0.2.0",
         "langchain-google-genai",
         "openai",
         "python-dotenv",
@@ -50,7 +49,6 @@ setup(
         "Intended Audience :: Developers",
         "License :: OSI Approved :: MIT License",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",

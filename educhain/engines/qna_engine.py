@@ -14,7 +14,8 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 # LLMMathChain removed due to compatibility issues - using direct LLM calls instead
-from langchain_classic.chains.retrieval_qa.base import RetrievalQA
+from langchain.agents import create_agent
+from langchain.tools import tool
 from langchain_community.vectorstores import Chroma
 from langchain_community.callbacks.manager import get_openai_callback
 from youtube_transcript_api import YouTubeTranscriptApi
@@ -212,12 +213,48 @@ class QnAEngine:
 
         return vectorstore
 
-    def _setup_retrieval_qa(self, vector_store: Chroma) -> RetrievalQA:
-        return RetrievalQA.from_chain_type(
-            llm=self.llm,
-            chain_type="stuff",
-            retriever=vector_store.as_retriever(),
+    def _create_retrieval_tool(self, vector_store: Chroma):
+        """Create a retrieval tool for the RAG agent (LangChain v1.0)"""
+        @tool(response_format="content_and_artifact")
+        def retrieve_context(query: str) -> str:
+            """Retrieve relevant context from the knowledge base to answer questions."""
+            # Retrieve top k relevant documents
+            retrieved_docs = vector_store.similarity_search(query, k=4)
+            
+            # Format the retrieved content
+            serialized = "\n\n".join(
+                (f"Source: {doc.metadata}\nContent: {doc.page_content}")
+                for doc in retrieved_docs
+            )
+            return serialized, retrieved_docs
+        
+        return retrieve_context
+
+    def _setup_rag_agent(self, vector_store: Chroma):
+        """Setup RAG agent using modern LangChain v1.0 pattern"""
+        # Create retrieval tool
+        retrieve_tool = self._create_retrieval_tool(vector_store)
+        
+        # Define system prompt for question generation
+        system_prompt = """You are an expert educational content generator specialized in creating high-quality questions.
+
+You have access to a retrieval tool that can fetch relevant content from the knowledge base.
+Use this tool to gather context before generating questions.
+
+When generating questions:
+1. First, use the retrieve_context tool to get relevant information
+2. Analyze the retrieved content thoroughly
+3. Generate questions that are clear, accurate, and pedagogically sound
+4. Ensure questions align with the specified requirements and format"""
+        
+        # Create agent with retrieval tool
+        agent = create_agent(
+            model=self.llm,
+            tools=[retrieve_tool],
+            system_prompt=system_prompt
         )
+        
+        return agent
 
     def _load_data(self, source: str, source_type: str) -> str:
         if source_type == 'pdf':
@@ -471,48 +508,49 @@ class QnAEngine:
         content = self._load_data(source, source_type)
 
         vector_store = self._create_vector_store(content)
-        qa_chain = self._setup_retrieval_qa(vector_store)
+        rag_agent = self._setup_rag_agent(vector_store)
 
         parser, model = self._get_parser_and_model(question_type, response_model)
         format_instructions = parser.get_format_instructions()
 
-        template = self._get_prompt_template(question_type, prompt_template)
+        # Build the query for the agent
+        query = f"""Generate {num} {question_type} questions based on the content in the knowledge base.
 
-        # Add learning objective and difficulty level if provided
-        if learning_objective or difficulty_level:
-            template += """
-            Learning Objective: {learning_objective}
-            Difficulty Level: {difficulty_level}
+Requirements:
+- Question Type: {question_type}
+- Number of Questions: {num}"""
 
-            Ensure that the questions are relevant to the learning objective and match the specified difficulty level.
-            """
-
-        template += """
-        The response should be in JSON format.
-        {format_instructions}
-        """
-
+        if learning_objective:
+            query += f"\n- Learning Objective: {learning_objective}"
+        
+        if difficulty_level:
+            query += f"\n- Difficulty Level: {difficulty_level}"
+        
         if custom_instructions:
-            template += f"\n\nAdditional Instructions:\n{custom_instructions}"
+            query += f"\n- Additional Instructions: {custom_instructions}"
+        
+        query += f"""
 
-        question_prompt = PromptTemplate(
-            input_variables=["num", "topic", "learning_objective", "difficulty_level"],
-            template=template,
-            partial_variables={"format_instructions": format_instructions}
-        )
+Output Format (IMPORTANT - You must follow this exact JSON format):
+{format_instructions}
 
-        query = question_prompt.format(
-            num=num,
-            topic=content[:1000],
-            learning_objective=learning_objective,
-            difficulty_level=difficulty_level,
-            **kwargs
-        )
+Instructions:
+1. First, use the retrieve_context tool to get relevant information from the knowledge base
+2. Analyze the retrieved content thoroughly
+3. Generate {num} high-quality {question_type} questions based on the content
+4. Ensure the output follows the exact JSON format specified above
+5. Make questions clear, accurate, and pedagogically sound"""
 
-        results = qa_chain.invoke({"query": query, "n_results": 3})
+        # Invoke the RAG agent
+        response = rag_agent.invoke({
+            "messages": [{"role": "user", "content": query}]
+        })
+
+        # Extract the generated content
+        result_content = response["messages"][-1].content
 
         try:
-            structured_output = parser.parse(results["result"])
+            structured_output = parser.parse(result_content)
 
             if output_format:
                 self._handle_output_format(structured_output, output_format)
@@ -520,7 +558,7 @@ class QnAEngine:
             return structured_output
         except Exception as e:
             print(f"Error parsing output in generate_questions_with_rag: {e}")
-            print("Raw output:", results)
+            print("Raw output:", result_content)
             return model()
 
     def generate_similar_options(self, question, correct_answer, num_options=3):
