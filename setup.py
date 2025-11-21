@@ -17,7 +17,7 @@ setup(
         "PyPDF2",
         "beautifulsoup4",
         "youtube-transcript-api",
-        "pydantic",  
+        "pydantic>=2.0,<3.0",  
         "requests",
         "chromadb",
         "protobuf",

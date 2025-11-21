@@ -366,7 +366,7 @@ When generating questions:
                 options = q_data.options
                 correct_answer = q_data.answer
 
-                self._generate_and_save_visual(instruction.dict(), question_text, options, correct_answer)
+                self._generate_and_save_visual(instruction.model_dump(), question_text, options, correct_answer)
                 print(q_data)
         else:
             print("Failed to generate visual questions or no questions were returned.")
@@ -976,7 +976,7 @@ Instructions:
             
             # Write each question to the CSV file
             for question in questions:
-                q_dict = question.dict() if hasattr(question, 'dict') else question
+                q_dict = question.model_dump() if hasattr(question, 'model_dump') else question
                 
                 # Check for duplicates
                 duplicate = False
@@ -992,7 +992,7 @@ Instructions:
                     continue
                     
                 # Add metadata if missing
-                if 'metadata' not in q_dict and hasattr(question_model, '__fields__') and 'metadata' in question_model.__fields__:
+                if 'metadata' not in q_dict and hasattr(question_model, 'model_fields') and 'metadata' in question_model.model_fields:
                     q_dict['metadata'] = {
                         "topic": combo["topic"],
                         "subtopic": combo["subtopic"],
@@ -1033,8 +1033,8 @@ Instructions:
                         row_data[field_name] = value
                     # Handle complex objects
                     else:
-                        if hasattr(value, 'dict'):
-                            value = value.dict()
+                        if hasattr(value, 'model_dump'):
+                            value = value.model_dump()
                         row_data[field_name] = json.dumps(value)
                 
                 # Write to CSV and track which questions were written        
@@ -1063,9 +1063,8 @@ Instructions:
                     question_model = MCQList
     
                 # Check for basic structure based on model fields
-                required_fields = {field for field, _ in question_model.__fields__.items() 
-                                 if not question_model.__fields__[field].default_factory
-                                 and question_model.__fields__[field].default is None}
+                required_fields = {field for field, field_info in question_model.model_fields.items() 
+                                 if field_info.is_required()}
                 
                 if not all(field in question_dict for field in required_fields):
                     missing = required_fields - set(question_dict.keys())
@@ -1175,7 +1174,7 @@ Instructions:
                         target_reached = True
                         break
 
-                    question_dict = question.dict() if hasattr(question, 'dict') else question
+                    question_dict = question.model_dump() if hasattr(question, 'model_dump') else question
                     
                     # Check for duplicates
                     duplicate = False
@@ -1193,7 +1192,7 @@ Instructions:
                         continue
                     
                     # Add metadata if missing
-                    if 'metadata' not in question_dict and hasattr(question_model, '__fields__') and 'metadata' in question_model.__fields__:
+                    if 'metadata' not in question_dict and hasattr(question_model, 'model_fields') and 'metadata' in question_model.model_fields:
                         question_dict['metadata'] = {
                             "topic": combo["topic"],
                             "subtopic": combo["subtopic"],
@@ -1563,7 +1562,7 @@ Instructions:
                     # Add questions
                     for i, question in enumerate(all_questions, 1):
                         # Get question data as dictionary
-                        q_dict = question.dict() if hasattr(question, 'dict') else question
+                        q_dict = question.model_dump() if hasattr(question, 'model_dump') else question
                         
                         # Add question number and find main question text
                         # Try common field names for question text
@@ -1673,8 +1672,8 @@ Instructions:
                                             elif isinstance(value, str):
                                                 is_correct = value.lower() in ['true', 't', 'yes', 'y', '1']
                                             break
-                                elif hasattr(option, 'dict'):  # Pydantic model
-                                    option_dict = option.dict()
+                                elif hasattr(option, 'model_dump'):  # Pydantic model
+                                    option_dict = option.model_dump()
                                     option_text = option_dict.get('text', str(option))
                                     is_correct = option_dict.get('correct', False)
                                 else:
@@ -1753,7 +1752,7 @@ Instructions:
             elif output_format == "json":
                 json_output_file = f"questions_{timestamp}.json"
                 with open(json_output_file, 'w') as f:
-                    json.dump([q.dict() if hasattr(q, 'dict') else q for q in all_questions], f, indent=4)
+                    json.dump([q.model_dump() if hasattr(q, 'model_dump') else q for q in all_questions], f, indent=4)
                 print(f"Questions saved to JSON: {json_output_file}")
                 output_file = json_output_file
 

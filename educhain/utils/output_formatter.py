@@ -17,13 +17,13 @@ class OutputFormatter:
         """Convert Pydantic model data to a list of dictionaries"""
         if hasattr(data, 'questions'):
             # If it's a question list model
-            return [q.dict() for q in data.questions]
+            return [q.model_dump() for q in data.questions]
         elif isinstance(data, list):
             # If it's already a list
-            return [item.dict() if hasattr(item, 'dict') else item for item in data]
+            return [item.model_dump() if hasattr(item, 'model_dump') else item for item in data]
         else:
             # Single item
-            return [data.dict() if hasattr(data, 'dict') else data]
+            return [data.model_dump() if hasattr(data, 'model_dump') else data]
 
     @staticmethod
     def to_csv(data: Any, filename: Optional[str] = None) -> str:
