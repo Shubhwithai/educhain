@@ -335,6 +335,40 @@ print(blooms_content.model_dump_json())
 ````
 </details>
 
+<details>
+<summary>🎙️ Generate Educational Podcasts    <img src="images/new.png" width="30" height="30" alt="New" background-color: transparent>  </summary>
+
+````python
+from educhain import Educhain
+
+client = Educhain()
+
+# Generate a complete podcast (script + audio) from a topic
+podcast = client.content_engine.generate_complete_podcast(
+    topic="Machine Learning Basics",
+    output_path="ml_podcast.mp3",
+    target_audience="Beginners",
+    duration="15 minutes"
+)
+
+# Generate only the podcast script
+script = client.content_engine.generate_podcast_script(
+    topic="Python Programming",
+    num_segments=4,
+    target_audience="Intermediate learners"
+)
+
+# Convert an existing script to audio
+audio = client.content_engine.generate_podcast_from_script(
+    script="Your podcast script here...",
+    output_path="output.mp3",
+    language="en"
+)
+
+print(script.model_dump_json())
+````
+</details>
+
 ## 🎓 Pedagogy & Educational Theory
 
 **Built on Sound Educational Principles** 📚
